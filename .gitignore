@@ -1,0 +1,21 @@
+# Runtime config written by the GUI on the Pi (stores domain + email).
+# Never commit this — it lives at /opt/rpi-webhost/config.env on the device.
+config.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments (if developing locally)
+venv/
+.venv/
+env/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log

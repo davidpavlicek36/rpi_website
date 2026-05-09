@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Server Logs</h1>
+  <p class="subtitle">Live nginx access and error logs</p>
+</div>
+
+<div class="card">
+  <div class="log-toolbar">
+    <div class="tab-group">
+      <button class="tab active" data-log="access">Access log</button>
+      <button class="tab" data-log="error">Error log</button>
+    </div>
+    <button id="pause-btn" class="btn btn-sm">Pause</button>
+  </div>
+  <div id="log-output" class="log-output"></div>
+</div>
+
+<script>
+(function () {
+  let es = null;
+  let paused = false;
+  let currentType = 'access';
+  const output = document.getElementById('log-output');
+  const pauseBtn = document.getElementById('pause-btn');
+
+  function connect(type) {
+    if (es) es.close();
+    output.textContent = '';
+    es = new EventSource('/api/logs?type=' + type);
+    es.onmessage = function (e) {
+      if (paused) return;
+      const line = document.createElement('div');
+      line.className = 'log-line' + (e.data.includes(' 4') || e.data.includes(' 5') ? ' log-line-warn' : '');
+      line.textContent = e.data;
+      output.appendChild(line);
+      if (output.children.length > 500) output.removeChild(output.firstChild);
+      output.scrollTop = output.scrollHeight;
+    };
+    es.onerror = function () {
+      const line = document.createElement('div');
+      line.className = 'log-line log-line-warn';
+      line.textContent = '[connection lost — retrying…]';
+      output.appendChild(line);
+    };
+  }
+
+  document.querySelectorAll('.tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.tab').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentType = btn.dataset.log;
+      connect(currentType);
+    });
+  });
+
+  pauseBtn.addEventListener('click', function () {
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  });
+
+  connect('access');
+})();
+</script>
+{% endblock %}

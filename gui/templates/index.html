@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Dashboard</h1>
+  <p class="subtitle">Overview of your Raspberry Pi web server</p>
+</div>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">nginx status</div>
+    <div class="stat-value {% if nginx == 'active' %}text-green{% else %}text-red{% endif %}">
+      <span class="dot {% if nginx == 'active' %}dot-green{% else %}dot-red{% endif %}"></span>
+      {{ nginx }}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Local IP</div>
+    <div class="stat-value"><code>{{ ip }}</code></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Domain</div>
+    <div class="stat-value">{{ domain if domain else '—' }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">SSL / HTTPS</div>
+    <div class="stat-value {% if ssl == 'yes' %}text-green{% else %}text-muted{% endif %}">
+      {% if ssl == 'yes' %}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        Active
+      {% else %}
+        Not configured
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Hosted Files</h2>
+    <a href="{{ url_for('upload') }}" class="btn btn-sm">Upload files</a>
+  </div>
+  {% if files %}
+  <table class="file-table">
+    <thead><tr><th>Path</th><th>Size</th></tr></thead>
+    <tbody>
+      {% for f in files %}
+      <tr>
+        <td><code>/{{ f.path }}</code></td>
+        <td class="text-muted">{{ (f.size / 1024) | round(1) }} KB</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    <p>No files yet. <a href="{{ url_for('upload') }}">Upload your first file →</a></p>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="card-header"><h2>Quick Access</h2></div>
+  <div class="quick-grid">
+    <div class="quick-item">
+      <div class="quick-title">View your site</div>
+      <div class="quick-desc">
+        {% if domain %}
+          <a href="http://{{ domain }}" target="_blank" rel="noopener">http://{{ domain }}</a>
+        {% else %}
+          <a href="http://{{ ip }}" target="_blank" rel="noopener">http://{{ ip }}</a>
+        {% endif %}
+      </div>
+    </div>
+    <div class="quick-item">
+      <div class="quick-title">SSH tunnel command</div>
+      <div class="quick-desc"><code>ssh -L 8080:localhost:8080 pi@{{ ip }}</code></div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
