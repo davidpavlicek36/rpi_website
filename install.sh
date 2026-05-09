@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Suppress locale warnings (Mac SSH forwards LC_CTYPE=UTF-8 which Perl rejects on Pi)
+export LC_ALL=C
+export LANG=C
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 BOLD='\033[1m'
 
@@ -64,6 +68,24 @@ echo ""
 log "Detected: $PI_MODEL ($ARCH)"
 [[ -n "$CLOUDFLARE_TOKEN" ]] && log "Mode: Cloudflare Tunnel (no open router ports)"
 echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+step "System locale"
+# ─────────────────────────────────────────────────────────────────────────────
+# Mac SSH clients forward LC_CTYPE=UTF-8 which Perl rejects on a fresh Pi.
+# Generate en_GB.UTF-8 (matching the Pi's default LANG) so future SSH
+# sessions are warning-free.
+
+LOCALE="en_GB.UTF-8"
+if locale -a 2>/dev/null | grep -qi "en_GB.utf8"; then
+    skip "locale $LOCALE (already generated)"
+else
+    info "Generating $LOCALE locale…"
+    sed -i "s/^# *${LOCALE}/${LOCALE}/" /etc/locale.gen
+    locale-gen "$LOCALE"
+    update-locale LANG="$LOCALE" LC_ALL="$LOCALE"
+    log "Locale $LOCALE generated — SSH locale warnings will not appear after reboot"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "System packages"
