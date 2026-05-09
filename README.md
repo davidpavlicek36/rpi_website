@@ -100,7 +100,7 @@ Visitor → Cloudflare → (encrypted tunnel) → Pi → nginx
 
 **1.** Create a free account at [cloudflare.com](https://www.cloudflare.com) and add your domain.
 
-**2.** Go to **Zero Trust → Networks → Tunnels → Create a tunnel**.
+**2.** Go to **Zero Trust → Networks → Connectors → Add a tunnel**.
 - Choose **Cloudflared** as the connector type
 - Give the tunnel a name (e.g. `my-pi`)
 - On the next screen, Cloudflare shows you a token — copy it

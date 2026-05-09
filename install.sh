@@ -8,46 +8,52 @@ INSTALL_DIR="/opt/rpi-webhost"
 WEB_ROOT="/var/www/html"
 SERVICE_NAME="rpi-webhost"
 CLOUDFLARE_TOKEN=""
+STEP=0
 
-# ── Argument parsing ─────────────────────────────────────────────────────────
+# ── Output helpers ────────────────────────────────────────────────────────────
+log()     { echo -e "${GREEN}[✓]${NC} $1"; }
+warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
+err()     { echo -e "${RED}[✗]${NC} $1"; exit 1; }
+info()    { echo -e "${BLUE}[→]${NC} $1"; }
+skip()    { echo -e "${YELLOW}[↷]${NC} Already done: $1 — skipping"; }
+detail()  { echo -e "    $1"; }           # indented sub-step info
+
+step() {
+    STEP=$((STEP + 1))
+    echo ""
+    echo -e "${BOLD}── Step ${STEP}: $1 ──────────────────────────────────${NC}"
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case $1 in
         --cloudflare)
-            [[ -z "${2:-}" ]] && { echo -e "${RED}[✗]${NC} --cloudflare requires a token"; exit 1; }
+            [[ -z "${2:-}" ]] && err "--cloudflare requires a token"
             CLOUDFLARE_TOKEN="$2"
-            shift 2
-            ;;
+            shift 2 ;;
         -h|--help)
             echo "Usage: sudo bash install.sh [--cloudflare <TOKEN>]"
             echo ""
             echo "  --cloudflare TOKEN   Route traffic through Cloudflare Tunnel instead of"
             echo "                       opening ports 80/443 directly on your router."
-            echo "                       Get a token at: dash.teams.cloudflare.com → Networks → Tunnels"
-            exit 0
-            ;;
+            echo "                       Get a token: dash.teams.cloudflare.com → Networks → Tunnels"
+            exit 0 ;;
         *)
-            echo -e "${RED}[✗]${NC} Unknown option: $1"
-            exit 1
-            ;;
+            err "Unknown option: $1" ;;
     esac
 done
 
-log()  { echo -e "${GREEN}[✓]${NC} $1"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-err()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
-info() { echo -e "${BLUE}[→]${NC} $1"; }
-
-# ── Root check ───────────────────────────────────────────────────────────────
+# ── Root check ────────────────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && err "Run with sudo: sudo bash install.sh"
 
-# ── Arch detection ───────────────────────────────────────────────────────────
+# ── Arch detection ────────────────────────────────────────────────────────────
 ARCH=$(uname -m)
 case $ARCH in
     armv6l)  PI_MODEL="Pi Zero / Zero W (ARMv6)" ;;
-    armv7l)  PI_MODEL="Pi 2 / 3 (ARMv7)" ;;
-    aarch64) PI_MODEL="Pi 4 / 5 (ARM64)" ;;
-    x86_64)  PI_MODEL="x86_64 (dev / test)" ;;
-    *)       PI_MODEL="Unknown ($ARCH)" ;;
+    armv7l)  PI_MODEL="Pi 2 / 3 (ARMv7)"         ;;
+    aarch64) PI_MODEL="Pi 4 / 5 (ARM64)"          ;;
+    x86_64)  PI_MODEL="x86_64 (dev / test)"       ;;
+    *)       PI_MODEL="Unknown ($ARCH)"            ;;
 esac
 
 echo ""
@@ -55,40 +61,63 @@ echo -e "${BOLD}╔════════════════════�
 echo -e "${BOLD}║       RPi Website Host — Installer       ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
 echo ""
-log "Detected: $PI_MODEL"
-[[ -n "$CLOUDFLARE_TOKEN" ]] && log "Mode: Cloudflare Tunnel (no open ports)"
+log "Detected: $PI_MODEL ($ARCH)"
+[[ -n "$CLOUDFLARE_TOKEN" ]] && log "Mode: Cloudflare Tunnel (no open router ports)"
 echo ""
 
-# ── Package installation ─────────────────────────────────────────────────────
-info "Updating package lists…"
-apt-get update -qq
+# ─────────────────────────────────────────────────────────────────────────────
+step "System packages"
+# ─────────────────────────────────────────────────────────────────────────────
 
-info "Installing nginx, certbot, Python, ufw, fail2ban…"
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    nginx \
-    certbot \
-    python3-certbot-nginx \
-    python3 \
-    python3-flask \
-    python3-werkzeug \
-    ufw \
-    fail2ban \
-    curl
+PKGS=(nginx certbot python3-certbot-nginx python3 python3-flask python3-werkzeug ufw fail2ban curl)
+PKGS_MISSING=()
+for pkg in "${PKGS[@]}"; do
+    if dpkg -l "$pkg" 2>/dev/null | grep -q '^ii'; then
+        detail "${pkg}: already installed"
+    else
+        detail "${pkg}: will install"
+        PKGS_MISSING+=("$pkg")
+    fi
+done
 
-# Fallback: install Flask via pip if not available in apt (old Pi OS)
-if ! python3 -c "import flask" 2>/dev/null; then
-    info "Flask not in apt — installing via pip…"
-    apt-get install -y -qq python3-pip
-    pip3 install flask werkzeug --quiet
+if [[ ${#PKGS_MISSING[@]} -eq 0 ]]; then
+    skip "all packages"
+else
+    echo ""
+    info "Updating package lists…"
+    apt-get update
+
+    info "Installing missing packages: ${PKGS_MISSING[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKGS_MISSING[@]}"
+    log "Packages installed"
 fi
-log "Packages installed"
 
-# ── Web root ─────────────────────────────────────────────────────────────────
-mkdir -p "$WEB_ROOT"
-chown www-data:www-data "$WEB_ROOT"
-chmod 755 "$WEB_ROOT"
+# Flask pip fallback (old Pi OS may not have python3-flask in apt)
+if ! python3 -c "import flask" 2>/dev/null; then
+    info "Flask not importable — installing via pip…"
+    apt-get install -y python3-pip
+    pip3 install flask werkzeug
+    log "Flask installed via pip"
+fi
 
-if [[ ! -f "$WEB_ROOT/index.html" ]]; then
+# ─────────────────────────────────────────────────────────────────────────────
+step "Web root"
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -d "$WEB_ROOT" ]]; then
+    skip "web root $WEB_ROOT"
+else
+    info "Creating $WEB_ROOT…"
+    mkdir -p "$WEB_ROOT"
+    chown www-data:www-data "$WEB_ROOT"
+    chmod 755 "$WEB_ROOT"
+    log "Web root created"
+fi
+
+if [[ -f "$WEB_ROOT/index.html" ]]; then
+    skip "default index.html (your file is already there)"
+else
+    info "Writing default landing page…"
     cat > "$WEB_ROOT/index.html" << 'HTML'
 <!DOCTYPE html>
 <html lang="en">
@@ -118,32 +147,49 @@ if [[ ! -f "$WEB_ROOT/index.html" ]]; then
 </html>
 HTML
     chown www-data:www-data "$WEB_ROOT/index.html"
+    log "Default landing page written"
 fi
 
-# ── Install GUI ───────────────────────────────────────────────────────────────
-info "Installing management GUI…"
-mkdir -p "$INSTALL_DIR"
+# ─────────────────────────────────────────────────────────────────────────────
+step "Management GUI"
+# ─────────────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -d "$SCRIPT_DIR/gui" ]]; then
-    cp -r "$SCRIPT_DIR/gui" "$INSTALL_DIR/"
+if [[ -f "$INSTALL_DIR/gui/app.py" ]]; then
+    skip "GUI files (already at $INSTALL_DIR/gui)"
 else
-    REPO="https://github.com/marshall1405/rpi_website"
-    curl -sSL "$REPO/archive/main.tar.gz" | tar xz -C /tmp
-    cp -r /tmp/rpi_website-main/gui "$INSTALL_DIR/"
-    rm -rf /tmp/rpi_website-main
+    info "Copying GUI files to $INSTALL_DIR…"
+    mkdir -p "$INSTALL_DIR"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -d "$SCRIPT_DIR/gui" ]]; then
+        detail "Source: local clone at $SCRIPT_DIR"
+        cp -r "$SCRIPT_DIR/gui" "$INSTALL_DIR/"
+    else
+        detail "Source: downloading from GitHub…"
+        REPO="https://github.com/marshall1405/rpi_website"
+        curl -fsSL --progress-bar "$REPO/archive/main.tar.gz" | tar xz -C /tmp
+        cp -r /tmp/rpi_website-main/gui "$INSTALL_DIR/"
+        rm -rf /tmp/rpi_website-main
+    fi
+    log "GUI files installed"
 fi
 
-touch "$INSTALL_DIR/config.env"
-chmod 600 "$INSTALL_DIR/config.env"
-log "GUI installed to $INSTALL_DIR"
+if [[ ! -f "$INSTALL_DIR/config.env" ]]; then
+    touch "$INSTALL_DIR/config.env"
+    chmod 600 "$INSTALL_DIR/config.env"
+fi
 
-# ── nginx ─────────────────────────────────────────────────────────────────────
-info "Configuring nginx…"
-rm -f /etc/nginx/sites-enabled/default
-mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+# ─────────────────────────────────────────────────────────────────────────────
+step "nginx"
+# ─────────────────────────────────────────────────────────────────────────────
 
-cat > /etc/nginx/sites-available/rpi-webhost << 'NGINX'
+if [[ -f /etc/nginx/sites-available/rpi-webhost ]]; then
+    skip "nginx site config"
+else
+    info "Writing nginx site config…"
+    rm -f /etc/nginx/sites-enabled/default
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+    cat > /etc/nginx/sites-available/rpi-webhost << 'NGINX'
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -167,47 +213,66 @@ server {
 }
 NGINX
 
-ln -sf /etc/nginx/sites-available/rpi-webhost /etc/nginx/sites-enabled/rpi-webhost
+    ln -sf /etc/nginx/sites-available/rpi-webhost /etc/nginx/sites-enabled/rpi-webhost
+    log "nginx config written"
+fi
+
+info "Testing nginx config…"
 nginx -t
+info "Enabling and restarting nginx…"
 systemctl enable nginx
 systemctl restart nginx
-log "nginx running"
+log "nginx is running"
 
-# ── Firewall (ufw) ────────────────────────────────────────────────────────────
-info "Configuring firewall…"
+# ─────────────────────────────────────────────────────────────────────────────
+step "Firewall (ufw)"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Always reconfigure — fast and guarantees rules are correct even on rerun
+info "Resetting firewall rules…"
 ufw --force reset > /dev/null 2>&1
 
+info "Setting default policies (deny all in/out)…"
 ufw default deny incoming
 ufw default deny outgoing
 
-# SSH is always needed
-ufw allow in  ssh
-ufw allow out ssh    # needed for SSH response packets on non-standard configs
+info "Allowing inbound SSH…"
+ufw allow in ssh
 
-# Outbound: only what the Pi legitimately needs
-ufw allow out 53           # DNS       (UDP + TCP)
-ufw allow out 123/udp      # NTP       — clock sync
-ufw allow out 443/tcp      # HTTPS     — apt, pip, cloudflared tunnel connection
+info "Allowing outbound DNS, NTP, HTTPS (apt / pip / tunnel)…"
+ufw allow out 53        # DNS (UDP + TCP)
+ufw allow out 123/udp   # NTP clock sync
+ufw allow out 443/tcp   # HTTPS — apt, pip, certbot, cloudflared
 
 if [[ -z "$CLOUDFLARE_TOKEN" ]]; then
-    # Standard mode: Pi is directly reachable — open 80/443 inbound
+    info "Standard mode: allowing inbound HTTP and HTTPS…"
     ufw allow in 80/tcp
     ufw allow in 443/tcp
-    ufw allow out 80/tcp   # HTTP — apt updates, certbot HTTP-01 challenge
-    log "Firewall: inbound SSH/HTTP/HTTPS · outbound DNS/NTP/HTTPS only"
+    info "Allowing outbound HTTP (apt updates, certbot HTTP challenge)…"
+    ufw allow out 80/tcp
 else
-    # Cloudflare mode: tunnel handles all traffic — no inbound ports needed
-    # cloudflared uses port 443 (already allowed) and optionally 7844/udp (QUIC)
-    ufw allow out 7844/udp # Cloudflare QUIC — faster tunnel, fallback to 443 TCP
-    log "Firewall: inbound SSH only (Cloudflare tunnel handles web traffic)"
+    info "Cloudflare mode: no inbound web ports needed — tunnel handles everything"
+    info "Allowing outbound Cloudflare QUIC (UDP 7844)…"
+    ufw allow out 7844/udp
 fi
 
+info "Enabling firewall…"
 ufw --force enable > /dev/null 2>&1
-log "Pi cannot reach your home network even if compromised (outbound LAN blocked)"
 
-# ── fail2ban ──────────────────────────────────────────────────────────────────
-info "Configuring fail2ban…"
-cat > /etc/fail2ban/jail.local << 'F2B'
+log "Firewall active"
+ufw status verbose
+echo ""
+log "Pi cannot reach your home network — outbound LAN traffic is blocked"
+
+# ─────────────────────────────────────────────────────────────────────────────
+step "fail2ban (brute-force protection)"
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -f /etc/fail2ban/jail.local ]]; then
+    skip "fail2ban config (jail.local already exists)"
+else
+    info "Writing fail2ban jail config…"
+    cat > /etc/fail2ban/jail.local << 'F2B'
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -219,24 +284,50 @@ enabled = true
 [nginx-http-auth]
 enabled = true
 F2B
+    log "fail2ban config written"
+fi
+
+info "Enabling fail2ban service…"
 systemctl enable fail2ban
+info "Starting fail2ban…"
 systemctl restart fail2ban
-log "fail2ban enabled (SSH brute-force protection active)"
+log "fail2ban running (bans IPs after 5 failed SSH attempts in 10 min)"
 
-# ── SSH hardening ─────────────────────────────────────────────────────────────
-info "Hardening SSH config…"
+# ─────────────────────────────────────────────────────────────────────────────
+step "SSH hardening"
+# ─────────────────────────────────────────────────────────────────────────────
+
 SSHD="/etc/ssh/sshd_config"
-cp "$SSHD" "${SSHD}.bak.$(date +%s)"
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/'   "$SSHD"
-sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/'       "$SSHD"
-sed -i 's/^#\?MaxAuthTries.*/MaxAuthTries 3/'          "$SSHD"
-sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 20/'     "$SSHD"
-systemctl reload sshd
-log "SSH: root login disabled, X11 off, max 3 auth tries"
 
-# ── Management GUI systemd service ────────────────────────────────────────────
-info "Creating management GUI service…"
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" << SERVICE
+if grep -q "^PermitRootLogin no" "$SSHD" 2>/dev/null; then
+    skip "SSH hardening (already applied)"
+else
+    info "Backing up $SSHD → ${SSHD}.bak.$(date +%s)"
+    cp "$SSHD" "${SSHD}.bak.$(date +%s)"
+
+    info "Disabling root login…"
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' "$SSHD"
+    info "Disabling X11 forwarding…"
+    sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' "$SSHD"
+    info "Setting max auth tries to 3…"
+    sed -i 's/^#\?MaxAuthTries.*/MaxAuthTries 3/' "$SSHD"
+    info "Setting login grace time to 20 s…"
+    sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 20/' "$SSHD"
+
+    info "Reloading SSH daemon…"
+    systemctl reload sshd
+    log "SSH hardened"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+step "Management GUI service"
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+    skip "GUI service file (already exists)"
+else
+    info "Writing systemd service file…"
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << SERVICE
 [Unit]
 Description=RPi Website Management GUI
 After=network.target nginx.service
@@ -253,39 +344,67 @@ Environment=PYTHONUNBUFFERED=1
 [Install]
 WantedBy=multi-user.target
 SERVICE
+    log "Service file written"
+fi
 
+info "Reloading systemd daemon…"
 systemctl daemon-reload
+info "Enabling GUI service…"
 systemctl enable "$SERVICE_NAME"
+info "Starting GUI service…"
 systemctl restart "$SERVICE_NAME"
-log "Management GUI service running on 127.0.0.1:8080"
+log "Management GUI running on 127.0.0.1:8080"
 
-# ── Cloudflare Tunnel (optional) ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 if [[ -n "$CLOUDFLARE_TOKEN" ]]; then
-    info "Setting up Cloudflare Tunnel…"
+step "Cloudflare Tunnel"
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # Pick the right binary for this arch
+if systemctl is-active cloudflared &>/dev/null; then
+    skip "cloudflared (service already running)"
+    warn "If you want to re-register with a new token, run:"
+    warn "  sudo cloudflared service uninstall && sudo bash install.sh --cloudflare <NEW_TOKEN>"
+else
     case $ARCH in
         aarch64) CF_ARCH="arm64" ;;
         armv7l)  CF_ARCH="arm"   ;;
-        armv6l)  CF_ARCH="arm"   ;;   # compiled with GOARM=6, runs on armv6
+        armv6l)  CF_ARCH="arm"   ;;
         x86_64)  CF_ARCH="amd64" ;;
         *)       err "cloudflared: unsupported architecture $ARCH" ;;
     esac
 
     CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}.deb"
-    info "Downloading cloudflared (${CF_ARCH})…"
-    curl -fsSL -o /tmp/cloudflared.deb "$CF_URL"
-    dpkg -i /tmp/cloudflared.deb > /dev/null
-    rm /tmp/cloudflared.deb
 
-    # Register the tunnel as a systemd service using the token
+    if command -v cloudflared &>/dev/null; then
+        skip "cloudflared binary (already installed)"
+    else
+        info "Downloading cloudflared for ${CF_ARCH}…"
+        detail "URL: $CF_URL"
+        detail "This may take a few minutes on slower Pis — you will see a progress bar"
+        echo ""
+        curl -fsSL --progress-bar -o /tmp/cloudflared.deb "$CF_URL"
+        echo ""
+        info "Installing cloudflared package…"
+        dpkg -i /tmp/cloudflared.deb
+        rm /tmp/cloudflared.deb
+        log "cloudflared installed ($(cloudflared --version 2>&1 | head -1))"
+    fi
+
+    info "Registering tunnel with Cloudflare (connecting to Cloudflare servers)…"
+    detail "This takes 10–30 seconds…"
     cloudflared service install "$CLOUDFLARE_TOKEN"
+    info "Enabling cloudflared service…"
     systemctl enable cloudflared
-    systemctl start  cloudflared
+    info "Starting cloudflared…"
+    systemctl start cloudflared
     log "Cloudflare Tunnel installed and running"
 fi
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+fi  # end Cloudflare block
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Done
+# ─────────────────────────────────────────────────────────────────────────────
 IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-pi-ip")
 
 echo ""
@@ -297,25 +416,20 @@ echo ""
 if [[ -n "$CLOUDFLARE_TOKEN" ]]; then
     echo -e "  ${BOLD}Mode:${NC}  Cloudflare Tunnel — no open ports on your router"
     echo -e "  ${BOLD}Site:${NC}  Check your Cloudflare dashboard for the public URL"
+    echo    "         Set the Public Hostname to point at http://localhost:80"
 else
-    echo -e "  ${BOLD}Your site is live at:${NC}  http://$IP"
-    echo    "  (Add a domain + SSL via the management GUI)"
+    echo -e "  ${BOLD}Site:${NC}  http://$IP  (local network)"
+    echo    "         Add a domain + SSL via the management GUI"
 fi
 
 echo ""
-echo -e "  ${BOLD}Management GUI (via SSH tunnel):${NC}"
-echo -e "  ${BLUE}1.${NC} On your laptop: ${YELLOW}ssh -L 8080:localhost:8080 pi@$IP${NC}"
-echo -e "  ${BLUE}2.${NC} Open in browser: ${YELLOW}http://localhost:8080${NC}"
+echo -e "  ${BOLD}Management GUI — SSH tunnel from your laptop:${NC}"
+echo -e "  ${BLUE}1.${NC} ${YELLOW}ssh -L 8080:localhost:8080 pi@$IP${NC}"
+echo -e "  ${BLUE}2.${NC} Open ${YELLOW}http://localhost:8080${NC} in your browser"
 echo ""
 echo    "  ──────────────────────────────────────────────────────────"
-echo    "  In the GUI you can:"
-echo    "  • Upload your HTML / CSS / images"
-echo    "  • Set your domain name"
-if [[ -z "$CLOUDFLARE_TOKEN" ]]; then
-    echo    "  • Get a free SSL certificate (Let's Encrypt)"
-fi
-echo    "  ──────────────────────────────────────────────────────────"
-echo ""
-warn "SECURITY TIP: Add your SSH public key, then disable password"
-warn "auth: edit /etc/ssh/sshd_config → PasswordAuthentication no"
+warn "SECURITY: Add your SSH key, then disable password auth:"
+warn "  ssh-copy-id pi@$IP"
+warn "  sudo sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config"
+warn "  sudo systemctl reload sshd"
 echo ""
