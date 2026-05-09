@@ -365,28 +365,44 @@ if systemctl is-active cloudflared &>/dev/null; then
     warn "If you want to re-register with a new token, run:"
     warn "  sudo cloudflared service uninstall && sudo bash install.sh --cloudflare <NEW_TOKEN>"
 else
+    # Determine install method:
+    # - arm64 and amd64 have matching .deb packages from Cloudflare
+    # - 32-bit ARM (.deb is armel but Raspberry Pi OS uses armhf ABI) → use raw binary
     case $ARCH in
-        aarch64) CF_ARCH="arm64" ;;
-        armv7l)  CF_ARCH="arm"   ;;
-        armv6l)  CF_ARCH="arm"   ;;
-        x86_64)  CF_ARCH="amd64" ;;
+        aarch64) CF_METHOD="deb";    CF_ARCH="arm64" ;;
+        x86_64)  CF_METHOD="deb";    CF_ARCH="amd64" ;;
+        armv7l)  CF_METHOD="binary"; CF_ARCH="arm"   ;;
+        armv6l)  CF_METHOD="binary"; CF_ARCH="arm"   ;;
         *)       err "cloudflared: unsupported architecture $ARCH" ;;
     esac
 
-    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}.deb"
+    CF_BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
 
     if command -v cloudflared &>/dev/null; then
-        skip "cloudflared binary (already installed)"
+        skip "cloudflared binary (already installed: $(cloudflared --version 2>&1 | head -1))"
     else
-        info "Downloading cloudflared for ${CF_ARCH}…"
-        detail "URL: $CF_URL"
-        detail "This may take a few minutes on slower Pis — you will see a progress bar"
-        echo ""
-        curl -fsSL --progress-bar -o /tmp/cloudflared.deb "$CF_URL"
-        echo ""
-        info "Installing cloudflared package…"
-        dpkg -i /tmp/cloudflared.deb
-        rm /tmp/cloudflared.deb
+        if [[ "$CF_METHOD" == "deb" ]]; then
+            CF_URL="${CF_BASE}/cloudflared-linux-${CF_ARCH}.deb"
+            info "Downloading cloudflared .deb for ${CF_ARCH}…"
+            detail "This may take a few minutes — you will see a progress bar"
+            echo ""
+            curl -fsSL --progress-bar -o /tmp/cloudflared.deb "$CF_URL"
+            echo ""
+            info "Installing cloudflared package…"
+            dpkg -i /tmp/cloudflared.deb
+            rm /tmp/cloudflared.deb
+        else
+            # 32-bit ARM: Cloudflare's .deb is armel but Raspberry Pi OS is armhf
+            # — dpkg refuses the install. Use the raw binary instead.
+            CF_URL="${CF_BASE}/cloudflared-linux-${CF_ARCH}"
+            info "Downloading cloudflared binary for ${CF_ARCH} (32-bit ARM, raw binary)…"
+            detail "Note: using raw binary — Raspberry Pi OS armhf is incompatible with the .deb package"
+            detail "This may take a few minutes on Pi Zero — you will see a progress bar"
+            echo ""
+            curl -fsSL --progress-bar -o /usr/local/bin/cloudflared "$CF_URL"
+            echo ""
+            chmod +x /usr/local/bin/cloudflared
+        fi
         log "cloudflared installed ($(cloudflared --version 2>&1 | head -1))"
     fi
 
