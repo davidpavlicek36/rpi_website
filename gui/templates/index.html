@@ -24,14 +24,10 @@
     <div class="stat-value">{{ domain if domain else '—' }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">SSL / HTTPS</div>
-    <div class="stat-value {% if ssl == 'yes' %}text-green{% else %}text-muted{% endif %}">
-      {% if ssl == 'yes' %}
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-        Active
-      {% else %}
-        Not configured
-      {% endif %}
+    <div class="stat-label">Cloudflare Tunnel</div>
+    <div class="stat-value {% if cloudflared == 'active' %}text-green{% else %}text-red{% endif %}">
+      <span class="dot {% if cloudflared == 'active' %}dot-green{% else %}dot-red{% endif %}"></span>
+      {{ cloudflared }}
     </div>
   </div>
 </div>
@@ -67,9 +63,9 @@
       <div class="quick-title">View your site</div>
       <div class="quick-desc">
         {% if domain %}
-          <a href="http://{{ domain }}" target="_blank" rel="noopener">http://{{ domain }}</a>
+          <a href="https://{{ domain }}" target="_blank" rel="noopener">https://{{ domain }}</a>
         {% else %}
-          <a href="http://{{ ip }}" target="_blank" rel="noopener">http://{{ ip }}</a>
+          Set your domain in Tunnel &amp; Domain
         {% endif %}
       </div>
     </div>

@@ -11,7 +11,7 @@ BOLD='\033[1m'
 INSTALL_DIR="/opt/rpi-webhost"
 WEB_ROOT="/var/www/html"
 SERVICE_NAME="rpi-webhost"
-CLOUDFLARE_TOKEN=""
+SERVICE_USER="rpi-webhost"
 STEP=0
 
 # ── Output helpers ────────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 err()     { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 info()    { echo -e "${BLUE}[→]${NC} $1"; }
 skip()    { echo -e "${YELLOW}[↷]${NC} Already done: $1 — skipping"; }
-detail()  { echo -e "    $1"; }           # indented sub-step info
+detail()  { echo -e "    $1"; }
 
 step() {
     STEP=$((STEP + 1))
@@ -28,27 +28,39 @@ step() {
     echo -e "${BOLD}── Step ${STEP}: $1 ──────────────────────────────────${NC}"
 }
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
+# ── Token input: env var (preferred) or --token-file ─────────────────────────
+# Do NOT pass the token as a bare CLI argument — it ends up in shell history
+# and briefly visible in `ps`. Use one of:
+#   sudo CF_TOKEN=<token> bash install.sh
+#   sudo bash install.sh --token-file /path/with/600/perms
+
+CLOUDFLARE_TOKEN="${CF_TOKEN:-}"
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --cloudflare)
-            [[ -z "${2:-}" ]] && err "--cloudflare requires a token"
-            CLOUDFLARE_TOKEN="$2"
+        --token-file)
+            [[ -z "${2:-}" ]] && err "--token-file requires a path"
+            [[ ! -f "$2" ]]   && err "Token file not found: $2"
+            CLOUDFLARE_TOKEN="$(< "$2")"
+            [[ -z "$CLOUDFLARE_TOKEN" ]] && err "Token file is empty: $2"
             shift 2 ;;
         -h|--help)
-            echo "Usage: sudo bash install.sh [--cloudflare <TOKEN>]"
+            echo "Usage:"
+            echo "  sudo CF_TOKEN=<token> bash install.sh"
+            echo "  sudo bash install.sh --token-file /path/to/token-file"
             echo ""
-            echo "  --cloudflare TOKEN   Route traffic through Cloudflare Tunnel instead of"
-            echo "                       opening ports 80/443 directly on your router."
-            echo "                       Get a token: dash.teams.cloudflare.com → Networks → Tunnels"
+            echo "Get a token: dash.teams.cloudflare.com → Networks → Tunnels → Create tunnel"
             exit 0 ;;
         *)
             err "Unknown option: $1" ;;
     esac
 done
 
+[[ -z "$CLOUDFLARE_TOKEN" ]] && err \
+    "Cloudflare tunnel token required.\n\n  sudo CF_TOKEN=<token> bash install.sh\n\nGet one at: dash.teams.cloudflare.com → Networks → Tunnels"
+
 # ── Root check ────────────────────────────────────────────────────────────────
-[[ $EUID -ne 0 ]] && err "Run with sudo: sudo bash install.sh"
+[[ $EUID -ne 0 ]] && err "Run with sudo: sudo CF_TOKEN=<token> bash install.sh"
 
 # ── Arch detection ────────────────────────────────────────────────────────────
 ARCH=$(uname -m)
@@ -66,16 +78,12 @@ echo -e "${BOLD}║       RPi Website Host — Installer       ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
 echo ""
 log "Detected: $PI_MODEL ($ARCH)"
-[[ -n "$CLOUDFLARE_TOKEN" ]] && log "Mode: Cloudflare Tunnel (no open router ports)"
+log "Mode: Cloudflare Tunnel (no open router ports)"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "System locale"
 # ─────────────────────────────────────────────────────────────────────────────
-# Mac SSH clients forward LC_CTYPE=UTF-8 which Perl rejects on a fresh Pi.
-# Generate en_GB.UTF-8 (matching the Pi's default LANG) so future SSH
-# sessions are warning-free.
-
 LOCALE="en_GB.UTF-8"
 if locale -a 2>/dev/null | grep -qi "en_GB.utf8"; then
     skip "locale $LOCALE (already generated)"
@@ -84,14 +92,14 @@ else
     sed -i "s/^# *${LOCALE}/${LOCALE}/" /etc/locale.gen
     locale-gen "$LOCALE"
     update-locale LANG="$LOCALE" LC_ALL="$LOCALE"
-    log "Locale $LOCALE generated — SSH locale warnings will not appear after reboot"
+    log "Locale $LOCALE generated"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "System packages"
 # ─────────────────────────────────────────────────────────────────────────────
-
-PKGS=(nginx certbot python3-certbot-nginx python3 python3-flask python3-werkzeug ufw fail2ban curl)
+# certbot/python3-certbot-nginx omitted — Cloudflare handles SSL at the edge
+PKGS=(nginx python3 python3-flask python3-werkzeug ufw fail2ban curl)
 PKGS_MISSING=()
 for pkg in "${PKGS[@]}"; do
     if dpkg -l "$pkg" 2>/dev/null | grep -q '^ii'; then
@@ -114,7 +122,6 @@ else
     log "Packages installed"
 fi
 
-# Flask pip fallback (old Pi OS may not have python3-flask in apt)
 if ! python3 -c "import flask" 2>/dev/null; then
     info "Flask not importable — installing via pip…"
     apt-get install -y python3-pip
@@ -123,18 +130,30 @@ if ! python3 -c "import flask" 2>/dev/null; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+step "Service user (least-privilege)"
+# ─────────────────────────────────────────────────────────────────────────────
+if id "$SERVICE_USER" &>/dev/null; then
+    skip "user $SERVICE_USER (already exists)"
+else
+    info "Creating system user $SERVICE_USER…"
+    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    log "User $SERVICE_USER created"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 step "Web root"
 # ─────────────────────────────────────────────────────────────────────────────
-
 if [[ -d "$WEB_ROOT" ]]; then
     skip "web root $WEB_ROOT"
 else
     info "Creating $WEB_ROOT…"
     mkdir -p "$WEB_ROOT"
-    chown www-data:www-data "$WEB_ROOT"
-    chmod 755 "$WEB_ROOT"
     log "Web root created"
 fi
+
+# Service user owns web root so it can write uploads without root
+chown -R "${SERVICE_USER}:www-data" "$WEB_ROOT"
+chmod 755 "$WEB_ROOT"
 
 if [[ -f "$WEB_ROOT/index.html" ]]; then
     skip "default index.html (your file is already there)"
@@ -168,14 +187,13 @@ else
 </body>
 </html>
 HTML
-    chown www-data:www-data "$WEB_ROOT/index.html"
+    chown "${SERVICE_USER}:www-data" "$WEB_ROOT/index.html"
     log "Default landing page written"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "Management GUI"
 # ─────────────────────────────────────────────────────────────────────────────
-
 if [[ -f "$INSTALL_DIR/gui/app.py" ]]; then
     skip "GUI files (already at $INSTALL_DIR/gui)"
 else
@@ -195,15 +213,19 @@ else
     log "GUI files installed"
 fi
 
+# Service user owns the install dir (config, secret key)
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
+chmod 750 "$INSTALL_DIR"
+
 if [[ ! -f "$INSTALL_DIR/config.env" ]]; then
     touch "$INSTALL_DIR/config.env"
+    chown "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR/config.env"
     chmod 600 "$INSTALL_DIR/config.env"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "nginx"
 # ─────────────────────────────────────────────────────────────────────────────
-
 if [[ -f /etc/nginx/sites-available/rpi-webhost ]]; then
     skip "nginx site config"
 else
@@ -219,10 +241,16 @@ server {
     root /var/www/html;
     index index.html index.htm;
 
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-Content-Type-Options "nosniff";
-    add_header X-XSS-Protection "1; mode=block";
-    add_header Referrer-Policy "strict-origin-when-cross-origin";
+    # Real visitor IP from Cloudflare Tunnel (traffic arrives from localhost)
+    set_real_ip_from 127.0.0.1;
+    real_ip_header CF-Connecting-IP;
+    real_ip_recursive on;
+
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
     location / {
         try_files $uri $uri/ =404;
@@ -247,10 +275,32 @@ systemctl restart nginx
 log "nginx is running"
 
 # ─────────────────────────────────────────────────────────────────────────────
+step "Public DNS (required for LAN isolation)"
+# ─────────────────────────────────────────────────────────────────────────────
+# We block RFC1918 outbound below, which would break DNS if the router
+# (192.168.x.x) is the resolver. Switch to Cloudflare's public DNS first.
+
+if [[ -f /etc/dhcpcd.conf ]]; then
+    if grep -q "static domain_name_servers" /etc/dhcpcd.conf; then
+        skip "dhcpcd DNS config (already set)"
+    else
+        info "Configuring dhcpcd to use Cloudflare DNS (1.1.1.1)…"
+        echo "static domain_name_servers=1.1.1.1 1.0.0.1" >> /etc/dhcpcd.conf
+        log "dhcpcd will use Cloudflare DNS after next reboot"
+    fi
+fi
+
+# Apply immediately so the rest of this install can resolve names
+info "Applying Cloudflare DNS to resolv.conf now…"
+{
+    echo "nameserver 1.1.1.1"
+    echo "nameserver 1.0.0.1"
+} > /etc/resolv.conf
+log "DNS set to 1.1.1.1 — router DNS no longer needed"
+
+# ─────────────────────────────────────────────────────────────────────────────
 step "Firewall (ufw)"
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Always reconfigure — fast and guarantees rules are correct even on rerun
 info "Resetting firewall rules…"
 ufw --force reset > /dev/null 2>&1
 
@@ -261,35 +311,29 @@ ufw default deny outgoing
 info "Allowing inbound SSH…"
 ufw allow in ssh
 
-info "Allowing outbound DNS, NTP, HTTPS (apt / pip / tunnel)…"
-ufw allow out 53        # DNS (UDP + TCP)
-ufw allow out 123/udp   # NTP clock sync
-ufw allow out 443/tcp   # HTTPS — apt, pip, certbot, cloudflared
+# Block RFC1918 outbound BEFORE the port-based allows so the Pi cannot
+# scan or reach LAN devices (NAS, router admin, IoT panels, etc.)
+info "Blocking outbound RFC1918 (LAN isolation)…"
+ufw deny out to 10.0.0.0/8
+ufw deny out to 172.16.0.0/12
+ufw deny out to 192.168.0.0/16
 
-if [[ -z "$CLOUDFLARE_TOKEN" ]]; then
-    info "Standard mode: allowing inbound HTTP and HTTPS…"
-    ufw allow in 80/tcp
-    ufw allow in 443/tcp
-    info "Allowing outbound HTTP (apt updates, certbot HTTP challenge)…"
-    ufw allow out 80/tcp
-else
-    info "Cloudflare mode: no inbound web ports needed — tunnel handles everything"
-    info "Allowing outbound Cloudflare QUIC (UDP 7844)…"
-    ufw allow out 7844/udp
-fi
+info "Allowing outbound internet traffic (DNS, NTP, HTTPS, Cloudflare QUIC)…"
+ufw allow out 53        # DNS — to 1.1.1.1 (RFC1918 already denied above)
+ufw allow out 123/udp   # NTP clock sync
+ufw allow out 443/tcp   # HTTPS — apt, pip, cloudflared
+ufw allow out 7844/udp  # Cloudflare QUIC (fallback tunnel transport)
 
 info "Enabling firewall…"
 ufw --force enable > /dev/null 2>&1
 
-log "Firewall active"
+log "Firewall active — Pi is LAN-isolated"
 ufw status verbose
 echo ""
-log "Pi cannot reach your home network — outbound LAN traffic is blocked"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "fail2ban (brute-force protection)"
 # ─────────────────────────────────────────────────────────────────────────────
-
 if [[ -f /etc/fail2ban/jail.local ]]; then
     skip "fail2ban config (jail.local already exists)"
 else
@@ -301,9 +345,6 @@ findtime = 10m
 maxretry = 5
 
 [sshd]
-enabled = true
-
-[nginx-http-auth]
 enabled = true
 F2B
     log "fail2ban config written"
@@ -318,7 +359,6 @@ log "fail2ban running (bans IPs after 5 failed SSH attempts in 10 min)"
 # ─────────────────────────────────────────────────────────────────────────────
 step "SSH hardening"
 # ─────────────────────────────────────────────────────────────────────────────
-
 SSHD="/etc/ssh/sshd_config"
 
 if grep -q "^PermitRootLogin no" "$SSHD" 2>/dev/null; then
@@ -342,9 +382,25 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+step "Sudoers (least-privilege tunnel restart)"
+# ─────────────────────────────────────────────────────────────────────────────
+SUDOERS_FILE="/etc/sudoers.d/rpi-webhost"
+if [[ -f "$SUDOERS_FILE" ]]; then
+    skip "sudoers file (already exists)"
+else
+    info "Writing sudoers entries for $SERVICE_USER…"
+    cat > "$SUDOERS_FILE" << 'SUDOERS'
+# Allow the rpi-webhost GUI to restart the Cloudflare tunnel only
+rpi-webhost ALL=(root) NOPASSWD: /bin/systemctl restart cloudflared
+rpi-webhost ALL=(root) NOPASSWD: /bin/systemctl status cloudflared
+SUDOERS
+    chmod 440 "$SUDOERS_FILE"
+    log "Sudoers configured — GUI may only restart/status cloudflared"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 step "Management GUI service"
 # ─────────────────────────────────────────────────────────────────────────────
-
 if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
     skip "GUI service file (already exists)"
 else
@@ -356,7 +412,7 @@ After=network.target nginx.service
 
 [Service]
 Type=simple
-User=root
+User=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}/gui
 ExecStart=/usr/bin/python3 ${INSTALL_DIR}/gui/app.py
 Restart=always
@@ -366,7 +422,7 @@ Environment=PYTHONUNBUFFERED=1
 [Install]
 WantedBy=multi-user.target
 SERVICE
-    log "Service file written"
+    log "Service file written (running as $SERVICE_USER, not root)"
 fi
 
 info "Reloading systemd daemon…"
@@ -378,18 +434,14 @@ systemctl restart "$SERVICE_NAME"
 log "Management GUI running on 127.0.0.1:8080"
 
 # ─────────────────────────────────────────────────────────────────────────────
-if [[ -n "$CLOUDFLARE_TOKEN" ]]; then
 step "Cloudflare Tunnel"
 # ─────────────────────────────────────────────────────────────────────────────
-
 if systemctl is-active cloudflared &>/dev/null; then
     skip "cloudflared (service already running)"
-    warn "If you want to re-register with a new token, run:"
-    warn "  sudo cloudflared service uninstall && sudo bash install.sh --cloudflare <NEW_TOKEN>"
+    warn "To re-register with a new token:"
+    warn "  sudo cloudflared service uninstall"
+    warn "  sudo CF_TOKEN=<NEW_TOKEN> bash install.sh"
 else
-    # Determine install method:
-    # - arm64 and amd64 have matching .deb packages from Cloudflare
-    # - 32-bit ARM (.deb is armel but Raspberry Pi OS uses armhf ABI) → use raw binary
     case $ARCH in
         aarch64) CF_METHOD="deb";    CF_ARCH="arm64" ;;
         x86_64)  CF_METHOD="deb";    CF_ARCH="amd64" ;;
@@ -415,10 +467,9 @@ else
             rm /tmp/cloudflared.deb
         else
             # 32-bit ARM: Cloudflare's .deb is armel but Raspberry Pi OS is armhf
-            # — dpkg refuses the install. Use the raw binary instead.
             CF_URL="${CF_BASE}/cloudflared-linux-${CF_ARCH}"
             info "Downloading cloudflared binary for ${CF_ARCH} (32-bit ARM, raw binary)…"
-            detail "Note: using raw binary — Raspberry Pi OS armhf is incompatible with the .deb package"
+            detail "Note: using raw binary — armhf is incompatible with the .deb package"
             detail "This may take a few minutes on Pi Zero — you will see a progress bar"
             echo ""
             curl -fsSL --progress-bar -o /usr/local/bin/cloudflared "$CF_URL"
@@ -428,7 +479,7 @@ else
         log "cloudflared installed ($(cloudflared --version 2>&1 | head -1))"
     fi
 
-    info "Registering tunnel with Cloudflare (connecting to Cloudflare servers)…"
+    info "Registering tunnel with Cloudflare…"
     detail "This takes 10–30 seconds…"
     cloudflared service install "$CLOUDFLARE_TOKEN"
     info "Enabling cloudflared service…"
@@ -437,8 +488,6 @@ else
     systemctl start cloudflared
     log "Cloudflare Tunnel installed and running"
 fi
-
-fi  # end Cloudflare block
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Done
@@ -450,16 +499,10 @@ echo -e "${BOLD}${GREEN}╔═════════════════�
 echo -e "${BOLD}${GREEN}║                  Installation Complete!                  ║${NC}"
 echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-
-if [[ -n "$CLOUDFLARE_TOKEN" ]]; then
-    echo -e "  ${BOLD}Mode:${NC}  Cloudflare Tunnel — no open ports on your router"
-    echo -e "  ${BOLD}Site:${NC}  Check your Cloudflare dashboard for the public URL"
-    echo    "         Set the Public Hostname to point at http://localhost:80"
-else
-    echo -e "  ${BOLD}Site:${NC}  http://$IP  (local network)"
-    echo    "         Add a domain + SSL via the management GUI"
-fi
-
+echo -e "  ${BOLD}Mode:${NC}  Cloudflare Tunnel — no open ports on your router"
+echo -e "  ${BOLD}Site:${NC}  Configure a Public Hostname in Cloudflare Zero Trust:"
+echo    "         dash.cloudflare.com → Zero Trust → Networks → Tunnels"
+echo    "         Public Hostname → http://localhost:80"
 echo ""
 echo -e "  ${BOLD}Management GUI — SSH tunnel from your laptop:${NC}"
 echo -e "  ${BLUE}1.${NC} ${YELLOW}ssh -L 8080:localhost:8080 pi@$IP${NC}"

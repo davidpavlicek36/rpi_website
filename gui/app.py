@@ -10,13 +10,13 @@ from flask import (Flask, render_template, request, redirect,
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = os.urandom(32)
 
 INSTALL_DIR  = Path('/opt/rpi-webhost')
 WEB_ROOT     = Path('/var/www/html')
 NGINX_CONF   = Path('/etc/nginx/sites-available/rpi-webhost')
 NGINX_LINK   = Path('/etc/nginx/sites-enabled/rpi-webhost')
 CONFIG_FILE  = INSTALL_DIR / 'config.env'
+SECRET_FILE  = INSTALL_DIR / 'secret_key'
 
 ALLOWED_EXT = {
     'html', 'htm', 'css', 'js', 'json', 'xml', 'txt',
@@ -26,7 +26,36 @@ ALLOWED_EXT = {
     'pdf',
 }
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Secret key — persistent across restarts ───────────────────────────────────
+def _load_secret_key() -> bytes:
+    try:
+        if SECRET_FILE.exists():
+            return SECRET_FILE.read_bytes().strip()
+        if SECRET_FILE.parent.exists():
+            key = os.urandom(32).hex().encode()
+            SECRET_FILE.write_bytes(key + b'\n')
+            SECRET_FILE.chmod(0o600)
+            return key
+    except OSError:
+        pass
+    return os.urandom(32)
+
+app.secret_key = _load_secret_key()
+
+# ── CSRF protection — reject cross-origin POSTs ───────────────────────────────
+@app.before_request
+def csrf_protect():
+    if request.method != 'POST':
+        return
+    origin  = request.headers.get('Origin', '')
+    referer = request.headers.get('Referer', '')
+    allowed = f'http://{request.host}'
+    if origin and not origin.startswith(allowed):
+        return 'Forbidden', 403
+    if not origin and referer and not referer.startswith(allowed):
+        return 'Forbidden', 403
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def allowed(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXT
@@ -34,11 +63,6 @@ def allowed(filename: str) -> bool:
 def valid_domain(d: str) -> bool:
     return bool(re.fullmatch(
         r'[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+', d
-    ))
-
-def valid_email(e: str) -> bool:
-    return bool(re.fullmatch(
-        r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', e
     ))
 
 def load_config() -> dict:
@@ -62,43 +86,20 @@ def nginx_status() -> str:
     except Exception:
         return 'unknown'
 
+def cloudflared_status() -> str:
+    try:
+        r = subprocess.run(['systemctl', 'is-active', 'cloudflared'],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception:
+        return 'unknown'
+
 def get_local_ip() -> str:
     try:
         r = subprocess.run(['hostname', '-I'], capture_output=True, text=True, timeout=5)
         return r.stdout.strip().split()[0]
     except Exception:
         return 'unknown'
-
-def reload_nginx():
-    subprocess.run(['nginx', '-t'], capture_output=True, check=True)
-    subprocess.run(['systemctl', 'reload', 'nginx'], capture_output=True, check=True)
-
-def write_nginx_http(domain: str):
-    conf = f"""server {{
-    listen 80;
-    listen [::]:80;
-    server_name {domain};
-    root /var/www/html;
-    index index.html index.htm;
-
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-Content-Type-Options "nosniff";
-    add_header X-XSS-Protection "1; mode=block";
-    add_header Referrer-Policy "strict-origin-when-cross-origin";
-
-    location / {{
-        try_files $uri $uri/ =404;
-    }}
-
-    location ~* \\.(css|js|png|jpg|jpeg|gif|ico|svg|webp|woff|woff2)$ {{
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-    }}
-}}
-"""
-    NGINX_CONF.write_text(conf)
-    if not NGINX_LINK.exists():
-        NGINX_LINK.symlink_to(NGINX_CONF)
 
 def list_web_files() -> list:
     if not WEB_ROOT.exists():
@@ -111,51 +112,74 @@ def list_web_files() -> list:
             files.append({'path': rel, 'size': size})
     return files
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
     cfg = load_config()
     return render_template('index.html',
                            nginx=nginx_status(),
+                           cloudflared=cloudflared_status(),
                            ip=get_local_ip(),
                            domain=cfg.get('DOMAIN', ''),
-                           ssl=cfg.get('SSL', 'no'),
                            files=list_web_files())
 
 
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
     if request.method == 'POST':
-        files   = request.files.getlist('files')
-        subdir  = request.form.get('subdir', '').strip().strip('/')
+        files     = request.files.getlist('files')
+        filepaths = request.form.getlist('filepaths')
+        subdir    = request.form.get('subdir', '').strip().strip('/')
 
-        # Validate subdir: only alphanumeric, hyphens, underscores, slashes
         if subdir and not re.fullmatch(r'[a-zA-Z0-9/_\-]+', subdir):
             flash('Invalid subdirectory name.', 'error')
             return redirect(url_for('upload'))
 
         uploaded, errors = [], []
-        for f in files:
+        for i, f in enumerate(files):
             if not f.filename:
                 continue
-            name = secure_filename(f.filename)
-            if not name:
-                errors.append(f'Skipped: empty filename')
-                continue
-            if not allowed(name):
-                errors.append(f'Skipped {name}: file type not allowed')
+
+            if filepaths and i < len(filepaths):
+                rel = filepaths[i]
+                parts = Path(rel).parts
+                inner = Path(*parts[1:]) if len(parts) > 1 else Path(parts[0])
+                safe_parts = [secure_filename(p) for p in inner.parts]
+                if not all(safe_parts):
+                    errors.append(f'Skipped: unsafe path {rel}')
+                    continue
+                rel_path = Path(*safe_parts)
+            else:
+                name = secure_filename(f.filename)
+                if not name:
+                    errors.append('Skipped: empty filename')
+                    continue
+                rel_path = Path(name)
+
+            if not allowed(rel_path.name):
+                errors.append(f'Skipped {rel_path}: file type not allowed')
                 continue
 
-            dest_dir = WEB_ROOT / subdir if subdir else WEB_ROOT
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / name
+            base = WEB_ROOT / subdir if subdir else WEB_ROOT
+            dest = (base / rel_path).resolve()
+
+            try:
+                dest.relative_to(WEB_ROOT.resolve())
+            except ValueError:
+                errors.append(f'Skipped {rel_path}: path outside web root')
+                continue
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
             f.save(str(dest))
             dest.chmod(0o644)
-            uploaded.append(f"{subdir + '/' if subdir else ''}{name}")
+            uploaded.append(str(rel_path))
+
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({'uploaded': uploaded, 'errors': errors})
 
         if uploaded:
-            flash(f"Uploaded: {', '.join(uploaded)}", 'success')
+            flash(f"Uploaded {len(uploaded)} file(s): {', '.join(uploaded[:5])}{'…' if len(uploaded) > 5 else ''}", 'success')
         for e in errors:
             flash(e, 'error')
         return redirect(url_for('upload'))
@@ -166,10 +190,9 @@ def upload():
 @app.route('/upload/delete', methods=['POST'])
 def delete_file():
     rel = request.form.get('path', '')
-    # Sanitize: prevent path traversal
     try:
         target = (WEB_ROOT / rel).resolve()
-        target.relative_to(WEB_ROOT.resolve())  # raises if outside web root
+        target.relative_to(WEB_ROOT.resolve())
     except (ValueError, Exception):
         flash('Invalid path.', 'error')
         return redirect(url_for('upload'))
@@ -186,56 +209,30 @@ def domain():
     if request.method == 'POST':
         action = request.form.get('action', '')
 
-        if action == 'save':
+        if action == 'save_domain':
             new_domain = request.form.get('domain', '').strip().lower()
-            new_email  = request.form.get('email', '').strip()
-
             if not valid_domain(new_domain):
                 flash('Invalid domain name.', 'error')
                 return redirect(url_for('domain'))
-            if not valid_email(new_email):
-                flash('Invalid email address.', 'error')
-                return redirect(url_for('domain'))
-
             cfg['DOMAIN'] = new_domain
-            cfg['EMAIL']  = new_email
             save_config(cfg)
+            flash(f'Domain saved: {new_domain}', 'success')
 
+        elif action == 'restart_tunnel':
             try:
-                write_nginx_http(new_domain)
-                reload_nginx()
-                flash(f'Domain set to {new_domain}. nginx reloaded.', 'success')
-            except subprocess.CalledProcessError as e:
-                flash(f'nginx config error: {e}', 'error')
-
-        elif action == 'certbot':
-            dom   = cfg.get('DOMAIN', '')
-            email = cfg.get('EMAIL', '')
-            if not dom or not email:
-                flash('Save your domain and email first.', 'error')
-                return redirect(url_for('domain'))
-            try:
-                result = subprocess.run(
-                    ['certbot', '--nginx',
-                     '-d', dom,
-                     '--email', email,
-                     '--agree-tos',
-                     '--non-interactive',
-                     '--redirect'],
-                    capture_output=True, text=True, timeout=120
+                subprocess.run(
+                    ['sudo', 'systemctl', 'restart', 'cloudflared'],
+                    capture_output=True, check=True, timeout=15
                 )
-                if result.returncode == 0:
-                    cfg['SSL'] = 'yes'
-                    save_config(cfg)
-                    flash('SSL certificate obtained! Your site now uses HTTPS.', 'success')
-                else:
-                    flash(f'certbot error: {result.stderr[-800:]}', 'error')
+                flash('Cloudflare Tunnel restarted.', 'success')
+            except subprocess.CalledProcessError as e:
+                flash(f'Failed to restart tunnel: {e.stderr}', 'error')
             except subprocess.TimeoutExpired:
-                flash('certbot timed out (120 s). Check that port 80 is reachable from the internet.', 'error')
+                flash('Restart timed out — check the Pi directly.', 'error')
 
         return redirect(url_for('domain'))
 
-    return render_template('domain.html', cfg=cfg)
+    return render_template('domain.html', cfg=cfg, tunnel=cloudflared_status())
 
 
 @app.route('/logs')
@@ -251,6 +248,7 @@ def api_logs():
     path = f'/var/log/nginx/{log_type}.log'
 
     def generate():
+        proc = None
         try:
             proc = subprocess.Popen(
                 ['tail', '-n', '80', '-f', path],
@@ -258,9 +256,12 @@ def api_logs():
             )
             for line in proc.stdout:
                 yield f'data: {line.rstrip()}\n\n'
-                time.sleep(0)   # yield to event loop
+                time.sleep(0)
         except Exception as exc:
             yield f'data: [error: {exc}]\n\n'
+        finally:
+            if proc and proc.poll() is None:
+                proc.terminate()
 
     return Response(
         stream_with_context(generate()),
@@ -271,7 +272,7 @@ def api_logs():
 
 @app.route('/api/status')
 def api_status():
-    return jsonify({'nginx': nginx_status(), 'ip': get_local_ip()})
+    return jsonify({'nginx': nginx_status(), 'cloudflared': cloudflared_status(), 'ip': get_local_ip()})
 
 
 if __name__ == '__main__':

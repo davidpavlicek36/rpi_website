@@ -1,71 +1,62 @@
 {% extends "base.html" %}
-{% block title %}Domain &amp; SSL{% endblock %}
+{% block title %}Tunnel &amp; Domain{% endblock %}
 {% block content %}
 
 <div class="page-header">
-  <h1>Domain &amp; SSL</h1>
-  <p class="subtitle">Configure your domain name and get a free HTTPS certificate</p>
+  <h1>Tunnel &amp; Domain</h1>
+  <p class="subtitle">Cloudflare handles routing and SSL — no certbot needed</p>
+</div>
+
+<div class="stat-grid" style="margin-bottom:1.5rem">
+  <div class="stat-card">
+    <div class="stat-label">Cloudflare Tunnel</div>
+    <div class="stat-value {% if tunnel == 'active' %}text-green{% else %}text-red{% endif %}">
+      <span class="dot {% if tunnel == 'active' %}dot-green{% else %}dot-red{% endif %}"></span>
+      {{ tunnel }}
+    </div>
+  </div>
 </div>
 
 <div class="card">
-  <h2>Step 1 — Set your domain</h2>
+  <h2>Restart tunnel</h2>
   <p class="text-muted" style="margin:.5rem 0 1.2rem">
-    Point your domain's DNS A record to your Pi's public IP before saving.
+    Use this if the tunnel shows as inactive or disconnected.
+  </p>
+  <form method="POST" onsubmit="this.querySelector('button').textContent='Restarting…'; this.querySelector('button').disabled=true;">
+    <input type="hidden" name="action" value="restart_tunnel">
+    <button type="submit" class="btn">Restart Cloudflare Tunnel</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Domain (for reference)</h2>
+  <p class="text-muted" style="margin:.5rem 0 1.2rem">
+    Your domain is configured in the Cloudflare dashboard, not here. Save it below
+    just so the dashboard can display it.
   </p>
   <form method="POST">
-    <input type="hidden" name="action" value="save">
+    <input type="hidden" name="action" value="save_domain">
     <div class="form-row">
       <label for="domain">Domain name</label>
       <input type="text" name="domain" id="domain" class="input"
              placeholder="example.com"
              value="{{ cfg.get('DOMAIN', '') }}" required>
     </div>
-    <div class="form-row">
-      <label for="email">Email <span class="text-muted">(for SSL certificate notices)</span></label>
-      <input type="email" name="email" id="email" class="input"
-             placeholder="you@example.com"
-             value="{{ cfg.get('EMAIL', '') }}" required>
-    </div>
-    <button type="submit" class="btn">Save &amp; Update nginx</button>
-  </form>
-</div>
-
-<div class="card {% if not cfg.get('DOMAIN') %}card-disabled{% endif %}">
-  <h2>Step 2 — Free SSL certificate (Let's Encrypt)</h2>
-  {% if cfg.get('SSL') == 'yes' %}
-    <div class="alert alert-success">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-      SSL is active. Certbot auto-renews your certificate every 90 days.
-    </div>
-  {% endif %}
-  <p class="text-muted" style="margin:.5rem 0 1.2rem">
-    Requires: domain saved above · port 80 reachable from the internet · DNS propagated.
-  </p>
-  <form method="POST" onsubmit="this.querySelector('button').textContent='Requesting…'; this.querySelector('button').disabled=true;">
-    <input type="hidden" name="action" value="certbot">
-    <button type="submit" class="btn {% if not cfg.get('DOMAIN') %}btn-disabled{% endif %}"
-            {% if not cfg.get('DOMAIN') %}disabled{% endif %}>
-      {% if cfg.get('SSL') == 'yes' %}Renew Certificate{% else %}Get Free SSL Certificate{% endif %}
-    </button>
+    <button type="submit" class="btn">Save</button>
   </form>
 </div>
 
 <div class="card">
-  <h2>DNS setup guide</h2>
+  <h2>How to connect your domain</h2>
   <ol class="guide-list">
-    <li>Find your Pi's <strong>public IP</strong>:
-      <code>curl -s ifconfig.me</code>
-    </li>
-    <li>In your domain registrar / DNS provider, add an <strong>A record</strong>:<br>
-      <code>@ → &lt;your public IP&gt;</code>
-    </li>
-    <li>Wait for DNS to propagate (usually 1–15 minutes, up to 24 h).</li>
-    <li>Save domain above, then click <em>Get Free SSL Certificate</em>.</li>
+    <li>Add your domain to <strong>Cloudflare</strong> and point its nameservers there.</li>
+    <li>Go to <strong>Zero Trust → Networks → Tunnels</strong> → click your tunnel.</li>
+    <li>Open the <strong>Public Hostnames</strong> tab → <em>Add a public hostname</em>.</li>
+    <li>Set <strong>Domain</strong> to your domain, <strong>Service</strong> to <code>HTTP</code>, URL to <code>localhost:80</code>.</li>
+    <li>Save — Cloudflare provisions SSL automatically.</li>
   </ol>
-  <p class="text-muted small">
-    No static IP? Use a DDNS service like
-    <a href="https://www.duckdns.org" target="_blank" rel="noopener">DuckDNS</a> or
-    <a href="https://www.cloudflare.com" target="_blank" rel="noopener">Cloudflare</a>.
+  <p class="text-muted small" style="margin-top:1rem">
+    <a href="https://one.dash.cloudflare.com" target="_blank" rel="noopener">Open Cloudflare Zero Trust dashboard →</a>
   </p>
 </div>
 

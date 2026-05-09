@@ -4,28 +4,63 @@
 
 <div class="page-header">
   <h1>Upload Files</h1>
-  <p class="subtitle">Add HTML, CSS, images, and other assets to your site</p>
+  <p class="subtitle">Upload individual files or an entire folder — structure is preserved</p>
 </div>
 
 <div class="card">
-  <form method="POST" enctype="multipart/form-data" id="upload-form">
-    <div class="drop-zone" id="drop-zone">
-      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-      <p>Drag &amp; drop files here, or <label for="file-input" class="link-btn">browse</label></p>
-      <p class="text-muted small">HTML · CSS · JS · PNG · JPG · SVG · WOFF · PDF · …</p>
-      <input type="file" name="files" id="file-input" multiple hidden>
+  <div class="tab-group" style="margin-bottom:1.25rem">
+    <button class="tab active" id="tab-files" onclick="switchTab('files')">Individual files</button>
+    <button class="tab"        id="tab-folder" onclick="switchTab('folder')">Whole folder</button>
+  </div>
+
+  <!-- ── Individual files ──────────────────────────────────────── -->
+  <div id="pane-files">
+    <form method="POST" enctype="multipart/form-data" id="upload-form">
+      <div class="drop-zone" id="drop-zone">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <p>Drag &amp; drop files here, or <label for="file-input" class="link-btn">browse</label></p>
+        <p class="text-muted small">HTML · CSS · JS · PNG · JPG · SVG · WOFF · PDF · …</p>
+        <input type="file" name="files" id="file-input" multiple hidden>
+      </div>
+
+      <div class="form-row" style="margin-top:1rem">
+        <label for="subdir">Subdirectory <span class="text-muted">(optional)</span></label>
+        <input type="text" name="subdir" id="subdir" placeholder="e.g. css  or  img  or  assets/fonts" class="input">
+        <p class="hint">Files land at <code>/var/www/html/[subdir]/filename</code>. Leave empty for web root.</p>
+      </div>
+
+      <div id="file-list" class="file-preview" hidden></div>
+      <button type="submit" class="btn" id="upload-btn" disabled>Upload</button>
+    </form>
+  </div>
+
+  <!-- ── Folder upload ─────────────────────────────────────────── -->
+  <div id="pane-folder" hidden>
+    <p style="margin-bottom:1rem;color:var(--muted)">
+      Select your website folder. The folder structure is preserved — <code>index.html</code>,
+      <code>css/style.css</code>, <code>img/photo.jpg</code> all land in the right places.
+    </p>
+
+    <div class="drop-zone" id="folder-zone" onclick="document.getElementById('folder-input').click()">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      <p>Click to choose a folder</p>
+      <p class="text-muted small">Everything inside will be uploaded with its structure intact</p>
+      <input type="file" id="folder-input" webkitdirectory hidden>
     </div>
 
-    <div class="form-row" style="margin-top:1rem">
-      <label for="subdir">Subdirectory <span class="text-muted">(optional)</span></label>
-      <input type="text" name="subdir" id="subdir" placeholder="e.g. css  or  img  or  assets/fonts" class="input">
-      <p class="hint">Leave empty to upload to the web root. Files land at <code>/var/www/html/[subdir]/filename</code>.</p>
+    <div id="folder-list" class="file-preview" hidden></div>
+
+    <div id="folder-progress" hidden style="margin-top:1rem">
+      <div class="progress-bar-wrap">
+        <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+      </div>
+      <p id="progress-label" class="hint" style="margin-top:.4rem">Uploading…</p>
     </div>
 
-    <div id="file-list" class="file-preview" hidden></div>
-
-    <button type="submit" class="btn" id="upload-btn" disabled>Upload</button>
-  </form>
+    <button class="btn" id="folder-btn" disabled onclick="uploadFolder()" style="margin-top:1rem">
+      Upload Folder
+    </button>
+  </div>
 </div>
 
 {% if files %}
@@ -50,5 +85,84 @@
   </table>
 </div>
 {% endif %}
+
+<script>
+function switchTab(tab) {
+  document.getElementById('pane-files').hidden  = (tab !== 'files');
+  document.getElementById('pane-folder').hidden = (tab !== 'folder');
+  document.getElementById('tab-files').classList.toggle('active',  tab === 'files');
+  document.getElementById('tab-folder').classList.toggle('active', tab === 'folder');
+}
+
+// ── Folder upload ────────────────────────────────────────────────────────────
+var folderFiles = [];
+
+document.getElementById('folder-input').addEventListener('change', function () {
+  folderFiles = Array.from(this.files);
+  var list = document.getElementById('folder-list');
+  list.hidden = folderFiles.length === 0;
+  list.innerHTML = '';
+  folderFiles.slice(0, 30).forEach(function (f) {
+    var d = document.createElement('div');
+    d.textContent = f.webkitRelativePath + ' (' + (f.size / 1024).toFixed(1) + ' KB)';
+    list.appendChild(d);
+  });
+  if (folderFiles.length > 30) {
+    var d = document.createElement('div');
+    d.textContent = '… and ' + (folderFiles.length - 30) + ' more files';
+    list.appendChild(d);
+  }
+  document.getElementById('folder-btn').disabled = folderFiles.length === 0;
+});
+
+async function uploadFolder() {
+  if (folderFiles.length === 0) return;
+
+  var btn      = document.getElementById('folder-btn');
+  var progress = document.getElementById('folder-progress');
+  var bar      = document.getElementById('progress-bar');
+  var label    = document.getElementById('progress-label');
+
+  btn.disabled = true;
+  progress.hidden = false;
+
+  var done = 0, errors = [];
+
+  for (var i = 0; i < folderFiles.length; i++) {
+    var f = folderFiles[i];
+    var fd = new FormData();
+    fd.append('files', f, f.name);
+    fd.append('filepaths', f.webkitRelativePath);
+
+    try {
+      var res = await fetch('/upload', {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: fd
+      });
+      var data = await res.json();
+      if (data.errors && data.errors.length) errors = errors.concat(data.errors);
+    } catch (e) {
+      errors.push('Network error on ' + f.webkitRelativePath);
+    }
+
+    done++;
+    var pct = Math.round((done / folderFiles.length) * 100);
+    bar.style.width = pct + '%';
+    label.textContent = done + ' / ' + folderFiles.length + ' files uploaded';
+  }
+
+  if (errors.length) {
+    label.textContent = 'Done with ' + errors.length + ' error(s): ' + errors.slice(0, 3).join(', ');
+    label.style.color = 'var(--red)';
+  } else {
+    label.textContent = 'All ' + done + ' files uploaded successfully!';
+    label.style.color = 'var(--green)';
+  }
+
+  // Reload page after short delay to refresh file list
+  setTimeout(function () { window.location.reload(); }, 1500);
+}
+</script>
 
 {% endblock %}
