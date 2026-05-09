@@ -136,7 +136,7 @@ if id "$SERVICE_USER" &>/dev/null; then
     skip "user $SERVICE_USER (already exists)"
 else
     info "Creating system user $SERVICE_USER…"
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    useradd --system --no-create-home --shell /usr/sbin/nologin -G adm "$SERVICE_USER"
     log "User $SERVICE_USER created"
 fi
 
