@@ -286,7 +286,8 @@ if [[ -f /etc/dhcpcd.conf ]]; then
     else
         info "Configuring dhcpcd to use Cloudflare DNS (1.1.1.1)…"
         echo "static domain_name_servers=1.1.1.1 1.0.0.1" >> /etc/dhcpcd.conf
-        log "dhcpcd will use Cloudflare DNS after next reboot"
+        systemctl restart dhcpcd 2>/dev/null || true
+        log "dhcpcd configured to use Cloudflare DNS (survives reboots)"
     fi
 fi
 
