@@ -4,6 +4,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import (Flask, render_template, request, redirect,
                    url_for, flash, Response, jsonify, stream_with_context)
@@ -41,6 +42,7 @@ def _load_secret_key() -> bytes:
     return os.urandom(32)
 
 app.secret_key = _load_secret_key()
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload cap
 
 # ── CSRF protection — reject cross-origin POSTs ───────────────────────────────
 @app.before_request
@@ -49,10 +51,13 @@ def csrf_protect():
         return
     origin  = request.headers.get('Origin', '')
     referer = request.headers.get('Referer', '')
-    allowed = f'http://{request.host}'
-    if origin and not origin.startswith(allowed):
+    # Require at least one source header — reject silent requests entirely
+    check = origin or referer
+    if not check:
         return 'Forbidden', 403
-    if not origin and referer and not referer.startswith(allowed):
+    # Exact netloc comparison prevents startswith bypass (e.g. localhost:8080.evil.com)
+    parsed = urlparse(check)
+    if parsed.scheme != 'http' or parsed.netloc != request.host:
         return 'Forbidden', 403
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -221,7 +226,7 @@ def domain():
         elif action == 'restart_tunnel':
             try:
                 subprocess.run(
-                    ['sudo', 'systemctl', 'restart', 'cloudflared'],
+                    ['sudo', '/usr/bin/systemctl', 'restart', 'cloudflared'],
                     capture_output=True, check=True, timeout=15
                 )
                 flash('Cloudflare Tunnel restarted.', 'success')
@@ -251,7 +256,7 @@ def api_logs():
         proc = None
         try:
             proc = subprocess.Popen(
-                ['tail', '-n', '80', '-f', path],
+                ['sudo', '/usr/bin/tail', '-n', '80', '-f', path],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
             for line in proc.stdout:

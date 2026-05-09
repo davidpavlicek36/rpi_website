@@ -205,7 +205,7 @@ else
         cp -r "$SCRIPT_DIR/gui" "$INSTALL_DIR/"
     else
         detail "Source: downloading from GitHub…"
-        REPO="https://github.com/marshall1405/rpi_website"
+        REPO="https://github.com/davidpavlicek36/rpi_website"
         curl -fsSL --progress-bar "$REPO/archive/main.tar.gz" | tar xz -C /tmp
         cp -r /tmp/rpi_website-main/gui "$INSTALL_DIR/"
         rm -rf /tmp/rpi_website-main
@@ -280,18 +280,31 @@ step "Public DNS (required for LAN isolation)"
 # We block RFC1918 outbound below, which would break DNS if the router
 # (192.168.x.x) is the resolver. Switch to Cloudflare's public DNS first.
 
-if [[ -f /etc/dhcpcd.conf ]]; then
+if systemctl is-active NetworkManager &>/dev/null; then
+    info "NetworkManager detected (Bookworm) — configuring via nmcli…"
+    ACTIVE_CON=$(nmcli -t -f NAME con show --active 2>/dev/null | head -1)
+    if [[ -n "$ACTIVE_CON" ]]; then
+        nmcli con mod "$ACTIVE_CON" ipv4.dns "1.1.1.1 1.0.0.1"
+        nmcli con mod "$ACTIVE_CON" ipv4.ignore-auto-dns yes
+        nmcli con up "$ACTIVE_CON" > /dev/null 2>&1 || true
+        log "NetworkManager set to Cloudflare DNS (survives reboots)"
+    else
+        warn "Could not detect active connection — skipping nmcli DNS config"
+    fi
+elif [[ -f /etc/dhcpcd.conf ]]; then
     if grep -q "static domain_name_servers" /etc/dhcpcd.conf; then
         skip "dhcpcd DNS config (already set)"
     else
-        info "Configuring dhcpcd to use Cloudflare DNS (1.1.1.1)…"
+        info "dhcpcd detected (Bullseye) — configuring…"
         echo "static domain_name_servers=1.1.1.1 1.0.0.1" >> /etc/dhcpcd.conf
         systemctl restart dhcpcd 2>/dev/null || true
-        log "dhcpcd configured to use Cloudflare DNS (survives reboots)"
+        log "dhcpcd set to Cloudflare DNS (survives reboots)"
     fi
+else
+    warn "No known network manager found — DNS may revert after reboot"
 fi
 
-# Apply immediately so the rest of this install can resolve names
+# Apply immediately regardless of network manager
 info "Applying Cloudflare DNS to resolv.conf now…"
 {
     echo "nameserver 1.1.1.1"
@@ -314,10 +327,12 @@ ufw allow in ssh
 
 # Block RFC1918 outbound BEFORE the port-based allows so the Pi cannot
 # scan or reach LAN devices (NAS, router admin, IoT panels, etc.)
-info "Blocking outbound RFC1918 (LAN isolation)…"
+info "Blocking outbound RFC1918 + IPv6 private ranges (LAN isolation)…"
 ufw deny out to 10.0.0.0/8
 ufw deny out to 172.16.0.0/12
 ufw deny out to 192.168.0.0/16
+ufw deny out to fc00::/7    # IPv6 ULA (private, equivalent of RFC1918)
+ufw deny out to fe80::/10   # IPv6 link-local
 
 info "Allowing outbound internet traffic (DNS, NTP, HTTPS, Cloudflare QUIC)…"
 ufw allow out 53        # DNS — to 1.1.1.1 (RFC1918 already denied above)
@@ -391,9 +406,12 @@ if [[ -f "$SUDOERS_FILE" ]]; then
 else
     info "Writing sudoers entries for $SERVICE_USER…"
     cat > "$SUDOERS_FILE" << 'SUDOERS'
-# Allow the rpi-webhost GUI to restart the Cloudflare tunnel only
-rpi-webhost ALL=(root) NOPASSWD: /bin/systemctl restart cloudflared
-rpi-webhost ALL=(root) NOPASSWD: /bin/systemctl status cloudflared
+# Tunnel restart — explicit path works on both Bullseye (/bin) and Bookworm (/usr/bin)
+rpi-webhost ALL=(root) NOPASSWD: /usr/bin/systemctl restart cloudflared
+rpi-webhost ALL=(root) NOPASSWD: /usr/bin/systemctl status cloudflared
+# Log reading — scoped to nginx logs only, no adm group needed
+rpi-webhost ALL=(root) NOPASSWD: /usr/bin/tail -n 80 -f /var/log/nginx/access.log
+rpi-webhost ALL=(root) NOPASSWD: /usr/bin/tail -n 80 -f /var/log/nginx/error.log
 SUDOERS
     chmod 440 "$SUDOERS_FILE"
     log "Sudoers configured — GUI may only restart/status cloudflared"

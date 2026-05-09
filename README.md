@@ -34,7 +34,7 @@ Visitor → Cloudflare (SSL) → encrypted tunnel → Pi → nginx
 **Step 2** — SSH into your Pi, then run:
 
 ```bash
-git clone https://github.com/marshall1405/rpi_website.git
+git clone https://github.com/davidpavlicek36/rpi_website.git
 cd rpi_website
 sudo CF_TOKEN=<your-token> bash install.sh
 ```
