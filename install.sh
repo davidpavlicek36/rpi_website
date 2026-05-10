@@ -28,6 +28,31 @@ step() {
     echo -e "${BOLD}── Step ${STEP}: $1 ──────────────────────────────────${NC}"
 }
 
+# ── Diagnostic helpers ────────────────────────────────────────────────────────
+
+# Run a command with a timeout; on failure print a hint and exit
+# Usage: guarded <seconds> <hint> <cmd> [args...]
+guarded() {
+    local secs=$1 hint=$2; shift 2
+    if ! timeout "$secs" "$@"; then
+        echo ""
+        err "$hint"
+    fi
+}
+
+# Verify a systemd service is active after starting it; dump recent logs if not
+assert_service() {
+    local svc=$1
+    sleep 2
+    if ! systemctl is-active "$svc" &>/dev/null; then
+        echo ""
+        warn "Service '$svc' failed to start. Recent logs:"
+        journalctl -u "$svc" -n 15 --no-pager 2>/dev/null || true
+        echo ""
+        err "Service '$svc' did not come up. Fix the error above, then re-run the installer."
+    fi
+}
+
 # ── Token input: env var (preferred) or --token-file ─────────────────────────
 # Do NOT pass the token as a bare CLI argument — it ends up in shell history
 # and briefly visible in `ps`. Use one of:
@@ -82,6 +107,31 @@ log "Mode: Cloudflare Tunnel (no open router ports)"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+step "Pre-flight checks"
+# ─────────────────────────────────────────────────────────────────────────────
+
+info "Checking internet connectivity…"
+if ! timeout 10 curl -fsSL --max-time 8 -o /dev/null https://1.1.1.1 2>/dev/null; then
+    err "No internet connection detected.\n  The Pi must be online to install packages and reach Cloudflare.\n  Check your WiFi / ethernet cable and try again."
+fi
+log "Internet connection confirmed"
+
+info "Checking iptables backend…"
+if ! iptables -L &>/dev/null 2>&1; then
+    warn "iptables not available — attempting to install…"
+    apt-get install -y iptables > /dev/null 2>&1 || err "Could not install iptables. Run: sudo apt-get install iptables"
+fi
+# Detect nftables/iptables mismatch (common cause of ufw hanging on Bullseye)
+if iptables --version 2>/dev/null | grep -q "nf_tables"; then
+    info "nftables backend detected — switching to iptables-legacy to prevent ufw hang…"
+    update-alternatives --set iptables  /usr/sbin/iptables-legacy  2>/dev/null || true
+    update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
+    log "iptables-legacy set as default"
+else
+    log "iptables backend OK"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 step "System locale"
 # ─────────────────────────────────────────────────────────────────────────────
 LOCALE="en_GB.UTF-8"
@@ -115,10 +165,14 @@ if [[ ${#PKGS_MISSING[@]} -eq 0 ]]; then
 else
     echo ""
     info "Updating package lists…"
-    apt-get update
+    if ! timeout 120 apt-get update; then
+        err "apt-get update failed.\n  Possible causes:\n  - No internet (already checked, may have dropped)\n  - Corrupt package lists: run 'sudo rm -rf /var/lib/apt/lists/*' and retry\n  - apt lock held by another process: wait a minute and retry"
+    fi
 
     info "Installing missing packages: ${PKGS_MISSING[*]}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKGS_MISSING[@]}"
+    if ! timeout 300 env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKGS_MISSING[@]}"; then
+        err "Package installation failed.\n  Try running manually: sudo apt-get install -y ${PKGS_MISSING[*]}\n  If you see 'dpkg was interrupted', run: sudo dpkg --configure -a"
+    fi
     log "Packages installed"
 fi
 
@@ -206,7 +260,9 @@ else
     else
         detail "Source: downloading from GitHub…"
         REPO="https://github.com/davidpavlicek36/rpi_website"
-        curl -fsSL --progress-bar "$REPO/archive/main.tar.gz" | tar xz -C /tmp
+        if ! timeout 60 curl -fsSL --progress-bar "$REPO/archive/main.tar.gz" | tar xz -C /tmp; then
+            err "Failed to download GUI files from GitHub.\n  Check your internet connection or clone the repo manually:\n  git clone $REPO && cd rpi_website && sudo CF_TOKEN=<token> bash install.sh"
+        fi
         cp -r /tmp/rpi_website-main/gui "$INSTALL_DIR/"
         rm -rf /tmp/rpi_website-main
     fi
@@ -268,10 +324,19 @@ NGINX
 fi
 
 info "Testing nginx config…"
-nginx -t
+if ! nginx -t 2>/tmp/nginx-test.log; then
+    cat /tmp/nginx-test.log
+    err "nginx config test failed (see above).\n  Edit /etc/nginx/sites-available/rpi-webhost to fix the error, then re-run."
+fi
+
 info "Enabling and restarting nginx…"
 systemctl enable nginx
-systemctl restart nginx
+if ! timeout 30 systemctl restart nginx; then
+    warn "nginx restart timed out or failed. Logs:"
+    journalctl -u nginx -n 10 --no-pager 2>/dev/null || true
+    err "nginx failed to start.\n  Run 'sudo nginx -t' for details."
+fi
+assert_service nginx
 log "nginx is running"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,6 +377,12 @@ info "Applying Cloudflare DNS to resolv.conf now…"
 } > /etc/resolv.conf
 log "DNS set to 1.1.1.1 — router DNS no longer needed"
 
+info "Verifying DNS resolution works…"
+if ! timeout 10 curl -fsSL --max-time 8 -o /dev/null https://1.1.1.1 2>/dev/null; then
+    err "DNS/connectivity check failed after switching to 1.1.1.1.\n  This usually means outbound port 443 is blocked on your network.\n  Check your router/firewall settings and try again."
+fi
+log "DNS resolution confirmed (1.1.1.1 reachable)"
+
 # ─────────────────────────────────────────────────────────────────────────────
 step "Firewall (ufw)"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,8 +411,17 @@ ufw allow out 123/udp   # NTP clock sync
 ufw allow out 443/tcp   # HTTPS — apt, pip, cloudflared
 ufw allow out 7844/udp  # Cloudflare QUIC (fallback tunnel transport)
 
-info "Enabling firewall…"
-ufw --force enable > /dev/null 2>&1
+info "Enabling firewall… (may take up to 30 s)"
+if ! timeout 45 ufw --force enable > /dev/null 2>&1; then
+    warn "ufw enable timed out — this usually means an iptables/nftables mismatch."
+    info "Attempting automatic fix: switching to iptables-legacy…"
+    update-alternatives --set iptables  /usr/sbin/iptables-legacy  2>/dev/null || true
+    update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
+    if ! timeout 30 ufw --force enable > /dev/null 2>&1; then
+        err "Firewall still failed to enable after iptables-legacy fix.\n  Run manually: sudo update-alternatives --set iptables /usr/sbin/iptables-legacy\n  Then: sudo ufw --force enable"
+    fi
+    log "iptables-legacy applied and firewall enabled"
+fi
 
 log "Firewall active — Pi is LAN-isolated"
 ufw status verbose
@@ -366,11 +446,15 @@ F2B
     log "fail2ban config written"
 fi
 
-info "Enabling fail2ban service…"
+info "Enabling and starting fail2ban…"
 systemctl enable fail2ban
-info "Starting fail2ban…"
-systemctl restart fail2ban
-log "fail2ban running (bans IPs after 5 failed SSH attempts in 10 min)"
+if ! timeout 30 systemctl restart fail2ban; then
+    warn "fail2ban failed to start — SSH brute-force protection is inactive."
+    warn "Run 'sudo systemctl status fail2ban' for details. This is non-fatal, continuing…"
+else
+    assert_service fail2ban
+    log "fail2ban running (bans IPs after 5 failed SSH attempts in 10 min)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "SSH hardening"
@@ -392,8 +476,18 @@ else
     info "Setting login grace time to 20 s…"
     sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 20/' "$SSHD"
 
+    info "Validating sshd config before reload…"
+    if ! sshd -t 2>/tmp/sshd-test.log; then
+        cat /tmp/sshd-test.log
+        warn "sshd config has errors — restoring backup to avoid locking you out"
+        cp "${SSHD}.bak."* "$SSHD" 2>/dev/null || true
+        err "SSH config validation failed (see above). Original config restored."
+    fi
+
     info "Reloading SSH daemon…"
-    systemctl reload sshd
+    if ! timeout 15 systemctl reload sshd; then
+        err "sshd reload failed.\n  Your SSH session is still active but hardening was not applied.\n  Run 'sudo systemctl status sshd' for details."
+    fi
     log "SSH hardened"
 fi
 
@@ -414,7 +508,13 @@ rpi-webhost ALL=(root) NOPASSWD: /usr/bin/tail -n 80 -f /var/log/nginx/access.lo
 rpi-webhost ALL=(root) NOPASSWD: /usr/bin/tail -n 80 -f /var/log/nginx/error.log
 SUDOERS
     chmod 440 "$SUDOERS_FILE"
-    log "Sudoers configured — GUI may only restart/status cloudflared"
+
+    info "Validating sudoers file…"
+    if ! visudo -cf "$SUDOERS_FILE" > /dev/null 2>&1; then
+        rm -f "$SUDOERS_FILE"
+        err "sudoers file failed validation and was removed. This is a bug — please report it."
+    fi
+    log "Sudoers configured"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -449,7 +549,12 @@ systemctl daemon-reload
 info "Enabling GUI service…"
 systemctl enable "$SERVICE_NAME"
 info "Starting GUI service…"
-systemctl restart "$SERVICE_NAME"
+if ! timeout 15 systemctl restart "$SERVICE_NAME"; then
+    warn "GUI service failed to start. Logs:"
+    journalctl -u "$SERVICE_NAME" -n 15 --no-pager 2>/dev/null || true
+    err "Management GUI did not start.\n  Common causes:\n  - Flask not installed (run: pip3 install flask werkzeug)\n  - Permission error on $INSTALL_DIR (run: sudo chown -R $SERVICE_USER $INSTALL_DIR)\n  - Python error in app.py (run: sudo -u $SERVICE_USER python3 $INSTALL_DIR/gui/app.py)"
+fi
+assert_service "$SERVICE_NAME"
 log "Management GUI running on 127.0.0.1:8080"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,10 +584,15 @@ else
             info "Downloading cloudflared .deb for ${CF_ARCH}…"
             detail "This may take a few minutes — you will see a progress bar"
             echo ""
-            curl -fsSL --progress-bar -o /tmp/cloudflared.deb "$CF_URL"
+            if ! timeout 180 curl -fsSL --progress-bar -o /tmp/cloudflared.deb "$CF_URL"; then
+                err "Failed to download cloudflared.\n  Check your internet connection and try again."
+            fi
             echo ""
             info "Installing cloudflared package…"
-            dpkg -i /tmp/cloudflared.deb
+            if ! dpkg -i /tmp/cloudflared.deb; then
+                rm -f /tmp/cloudflared.deb
+                err "cloudflared package install failed.\n  Run 'sudo apt-get install -f' to fix broken dependencies, then retry."
+            fi
             rm /tmp/cloudflared.deb
         else
             # 32-bit ARM: Cloudflare's .deb is armel but Raspberry Pi OS is armhf
@@ -491,20 +601,29 @@ else
             detail "Note: using raw binary — armhf is incompatible with the .deb package"
             detail "This may take a few minutes on Pi Zero — you will see a progress bar"
             echo ""
-            curl -fsSL --progress-bar -o /usr/local/bin/cloudflared "$CF_URL"
+            if ! timeout 300 curl -fsSL --progress-bar -o /usr/local/bin/cloudflared "$CF_URL"; then
+                err "Failed to download cloudflared binary.\n  Check your internet connection and try again."
+            fi
             echo ""
             chmod +x /usr/local/bin/cloudflared
         fi
         log "cloudflared installed ($(cloudflared --version 2>&1 | head -1))"
     fi
 
-    info "Registering tunnel with Cloudflare…"
-    detail "This takes 10–30 seconds…"
-    cloudflared service install "$CLOUDFLARE_TOKEN"
+    info "Registering tunnel with Cloudflare… (10–30 s)"
+    if ! timeout 60 cloudflared service install "$CLOUDFLARE_TOKEN"; then
+        err "cloudflared tunnel registration failed.\n  Common causes:\n  - Invalid or expired token — get a new one at dash.teams.cloudflare.com → Networks → Tunnels\n  - No outbound internet on port 443 (check firewall / router)"
+    fi
+
     info "Enabling cloudflared service…"
     systemctl enable cloudflared
     info "Starting cloudflared…"
-    systemctl start cloudflared
+    if ! timeout 30 systemctl start cloudflared; then
+        warn "cloudflared failed to start. Logs:"
+        journalctl -u cloudflared -n 15 --no-pager 2>/dev/null || true
+        err "cloudflared did not start.\n  If you see a DNS error, your DNS may not have applied yet.\n  Try: echo 'nameserver 1.1.1.1' | sudo tee /etc/resolv.conf && sudo systemctl start cloudflared"
+    fi
+    assert_service cloudflared
     log "Cloudflare Tunnel installed and running"
 fi
 
