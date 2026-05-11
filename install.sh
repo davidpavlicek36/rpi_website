@@ -15,16 +15,19 @@ SERVICE_USER="rpi-webhost"
 STEP=0
 
 # ── Output helpers ────────────────────────────────────────────────────────────
-log()     { echo -e "${GREEN}[✓]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
-err()     { echo -e "${RED}[✗]${NC} $1"; exit 1; }
-info()    { echo -e "${BLUE}[→]${NC} $1"; }
-skip()    { echo -e "${YELLOW}[↷]${NC} Already done: $1 — skipping"; }
-detail()  { echo -e "    $1"; }
+# \033[0G resets cursor to column 0 — prevents apt/ufw \r sequences from
+# leaving the cursor mid-line and making our output appear indented
+R=$'\033[0G'
+log()     { printf '%s' "$R"; echo -e "${GREEN}[✓]${NC} $1"; }
+warn()    { printf '%s' "$R"; echo -e "${YELLOW}[!]${NC} $1"; }
+err()     { printf '%s' "$R"; echo -e "${RED}[✗]${NC} $1"; exit 1; }
+info()    { printf '%s' "$R"; echo -e "${BLUE}[→]${NC} $1"; }
+skip()    { printf '%s' "$R"; echo -e "${YELLOW}[↷]${NC} Already done: $1 — skipping"; }
+detail()  { printf '%s' "$R"; echo -e "    $1"; }
 
 step() {
     STEP=$((STEP + 1))
-    echo ""
+    printf '%s\n' "$R"
     echo -e "${BOLD}── Step ${STEP}: $1 ──────────────────────────────────${NC}"
 }
 
@@ -165,12 +168,12 @@ if [[ ${#PKGS_MISSING[@]} -eq 0 ]]; then
 else
     echo ""
     info "Updating package lists…"
-    if ! timeout 120 apt-get update -qq > /dev/null 2>&1; then
+    if ! timeout 120 apt-get update -yqq > /dev/null 2>&1; then
         err "apt-get update failed.\n  Possible causes:\n  - No internet (already checked, may have dropped)\n  - Corrupt package lists: run 'sudo rm -rf /var/lib/apt/lists/*' and retry\n  - apt lock held by another process: wait a minute and retry"
     fi
 
     info "Installing: ${PKGS_MISSING[*]} (this may take a few minutes…)"
-    ( while true; do sleep 4; printf '.'; done ) &
+    ( printf '.'; while true; do sleep 2; printf '.'; done ) &
     APT_DOTS=$!
     timeout 300 env DEBIAN_FRONTEND=noninteractive apt-get install -yqq "${PKGS_MISSING[@]}" > /dev/null 2>&1 || true
     kill $APT_DOTS 2>/dev/null; wait $APT_DOTS 2>/dev/null || true; printf '\n'
@@ -202,7 +205,7 @@ if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
     skip "unattended-upgrades (already installed)"
 else
     info "Installing unattended-upgrades…"
-    ( while true; do sleep 4; printf '.'; done ) &
+    ( printf '.'; while true; do sleep 2; printf '.'; done ) &
     APT_DOTS=$!
     timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install -yqq unattended-upgrades > /dev/null 2>&1 || true
     kill $APT_DOTS 2>/dev/null; wait $APT_DOTS 2>/dev/null || true; printf '\n'
@@ -468,7 +471,7 @@ ufw allow out 443/tcp   # HTTPS — apt, pip, cloudflared
 ufw allow out 7844/udp  # Cloudflare QUIC (fallback tunnel transport)
 
 info "Enabling firewall… (may take up to 60 s — Pi is still working)"
-( while true; do sleep 4; printf '.'; done ) &
+( printf '.'; while true; do sleep 2; printf '.'; done ) &
 DOTS_PID=$!
 UFW_RC=0
 timeout 45 ufw --force enable > /dev/null 2>&1 || UFW_RC=$?
@@ -478,7 +481,7 @@ if [[ $UFW_RC -ne 0 ]]; then
     warn "ufw enable timed out — applying iptables-legacy fix…"
     update-alternatives --set iptables  /usr/sbin/iptables-legacy  2>/dev/null || true
     update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
-    ( while true; do sleep 4; printf '.'; done ) &
+    ( printf '.'; while true; do sleep 2; printf '.'; done ) &
     DOTS_PID=$!
     UFW_RC2=0
     timeout 30 ufw --force enable > /dev/null 2>&1 || UFW_RC2=$?
