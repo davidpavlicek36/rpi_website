@@ -458,13 +458,23 @@ ufw allow out 123/udp   # NTP clock sync
 ufw allow out 443/tcp   # HTTPS — apt, pip, cloudflared
 ufw allow out 7844/udp  # Cloudflare QUIC (fallback tunnel transport)
 
-info "Enabling firewall… (may take up to 30 s)"
-if ! timeout 45 ufw --force enable > /dev/null 2>&1; then
-    warn "ufw enable timed out — this usually means an iptables/nftables mismatch."
-    info "Attempting automatic fix: switching to iptables-legacy…"
+info "Enabling firewall… (may take up to 60 s — Pi is still working)"
+( while true; do sleep 4; printf '.'; done ) &
+DOTS_PID=$!
+timeout 45 ufw --force enable > /dev/null 2>&1
+UFW_RC=$?
+kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null; printf '\n'
+
+if [[ $UFW_RC -ne 0 ]]; then
+    warn "ufw enable timed out — applying iptables-legacy fix…"
     update-alternatives --set iptables  /usr/sbin/iptables-legacy  2>/dev/null || true
     update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
-    if ! timeout 30 ufw --force enable > /dev/null 2>&1; then
+    ( while true; do sleep 4; printf '.'; done ) &
+    DOTS_PID=$!
+    timeout 30 ufw --force enable > /dev/null 2>&1
+    UFW_RC2=$?
+    kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null; printf '\n'
+    if [[ $UFW_RC2 -ne 0 ]]; then
         err "Firewall still failed to enable after iptables-legacy fix.\n  Run manually: sudo update-alternatives --set iptables /usr/sbin/iptables-legacy\n  Then: sudo ufw --force enable"
     fi
     log "iptables-legacy applied and firewall enabled"
