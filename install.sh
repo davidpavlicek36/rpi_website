@@ -199,10 +199,11 @@ if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
     skip "unattended-upgrades (already installed)"
 else
     info "Installing unattended-upgrades…"
-    if ! timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades; then
-        warn "Failed to install unattended-upgrades — automatic apt updates will not run. Non-fatal, continuing…"
-    else
+    timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades || true
+    if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
         log "unattended-upgrades installed"
+    else
+        warn "Failed to install unattended-upgrades — automatic apt updates will not run. Non-fatal, continuing…"
     fi
 fi
 
