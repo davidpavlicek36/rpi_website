@@ -173,7 +173,7 @@ else
     ( while true; do sleep 4; printf '.'; done ) &
     APT_DOTS=$!
     timeout 300 env DEBIAN_FRONTEND=noninteractive apt-get install -yqq "${PKGS_MISSING[@]}" > /dev/null 2>&1 || true
-    kill $APT_DOTS 2>/dev/null; wait $APT_DOTS 2>/dev/null; printf '\n'
+    kill $APT_DOTS 2>/dev/null; wait $APT_DOTS 2>/dev/null || true; printf '\n'
 
     # Verify packages actually landed — apt can exit non-zero for harmless reasons
     FAILED=()
@@ -205,7 +205,7 @@ else
     ( while true; do sleep 4; printf '.'; done ) &
     APT_DOTS=$!
     timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install -yqq unattended-upgrades > /dev/null 2>&1 || true
-    kill $APT_DOTS 2>/dev/null; wait $APT_DOTS 2>/dev/null; printf '\n'
+    kill $APT_DOTS 2>/dev/null; wait $APT_DOTS 2>/dev/null || true; printf '\n'
     if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
         log "unattended-upgrades installed"
     else
@@ -472,7 +472,7 @@ info "Enabling firewall… (may take up to 60 s — Pi is still working)"
 DOTS_PID=$!
 UFW_RC=0
 timeout 45 ufw --force enable > /dev/null 2>&1 || UFW_RC=$?
-kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null; printf '\n'
+kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null || true; printf '\n'
 
 if [[ $UFW_RC -ne 0 ]]; then
     warn "ufw enable timed out — applying iptables-legacy fix…"
@@ -482,7 +482,7 @@ if [[ $UFW_RC -ne 0 ]]; then
     DOTS_PID=$!
     UFW_RC2=0
     timeout 30 ufw --force enable > /dev/null 2>&1 || UFW_RC2=$?
-    kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null; printf '\n'
+    kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null || true; printf '\n'
     if [[ $UFW_RC2 -ne 0 ]]; then
         err "Firewall still failed to enable after iptables-legacy fix.\n  Run manually: sudo update-alternatives --set iptables /usr/sbin/iptables-legacy\n  Then: sudo ufw --force enable"
     fi
