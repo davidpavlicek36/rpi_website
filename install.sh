@@ -184,6 +184,45 @@ if ! python3 -c "import flask" 2>/dev/null; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+step "Automatic security updates"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# unattended-upgrades applies apt security patches nightly (nginx, system libs)
+if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
+    skip "unattended-upgrades (already installed)"
+else
+    info "Installing unattended-upgrades…"
+    if ! timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades; then
+        warn "Failed to install unattended-upgrades — automatic apt updates will not run. Non-fatal, continuing…"
+    else
+        log "unattended-upgrades installed"
+    fi
+fi
+
+AUTO_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
+if [[ -f "$AUTO_UPGRADES" ]]; then
+    skip "auto-upgrades config (already exists)"
+else
+    info "Enabling nightly security updates…"
+    cat > "$AUTO_UPGRADES" << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+    log "Nightly security updates enabled (nginx + system packages)"
+fi
+
+# cloudflared weekly update cron job (runs every Sunday at 3am)
+# PATH ensures the binary is found regardless of install location
+CRON_JOB="0 3 * * 0 PATH=/usr/local/bin:/usr/bin:/bin cloudflared update > /dev/null 2>&1 && systemctl restart cloudflared > /dev/null 2>&1"
+if crontab -l 2>/dev/null | grep -q "cloudflared update"; then
+    skip "cloudflared update cron job (already exists)"
+else
+    info "Adding weekly cloudflared update cron job…"
+    (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+    log "cloudflared will auto-update every Sunday at 3am"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 step "Service user (least-privilege)"
 # ─────────────────────────────────────────────────────────────────────────────
 if id "$SERVICE_USER" &>/dev/null; then

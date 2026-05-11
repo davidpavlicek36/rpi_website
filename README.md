@@ -4,11 +4,13 @@ Host your own website on a Raspberry Pi with a single command. Traffic routes th
 
 > ❗ **For static websites only.** Cloudflare Tunnel routes all traffic through Cloudflare's infrastructure — they can see the full payload of everything transmitted. Do not use this to host anything with databases, user logins, or sensitive information.
 
+> 🛠️ **Hobby project.** This software has not been tested over a long period of time and comes with no guarantees of stability, security, or continued maintenance. Use at your own risk.
+
 ---
 
 ## Requirements
 
-- A Raspberry Pi (any model — Zero, 2, 3, 4, 5)
+- A Raspberry Pi Zero (for more models, see the [Compatibility](#compatibility) section)
 - Raspberry Pi OS installed and running
 - Internet connection on the Pi
 - SSH access to the Pi from your laptop (`ssh pi@<ip>`)
