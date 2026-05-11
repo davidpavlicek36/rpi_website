@@ -170,8 +170,15 @@ else
     fi
 
     info "Installing missing packages: ${PKGS_MISSING[*]}"
-    if ! timeout 300 env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKGS_MISSING[@]}"; then
-        err "Package installation failed.\n  Try running manually: sudo apt-get install -y ${PKGS_MISSING[*]}\n  If you see 'dpkg was interrupted', run: sudo dpkg --configure -a"
+    timeout 300 env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKGS_MISSING[@]}" || true
+
+    # Verify packages actually landed — apt can exit non-zero for harmless reasons
+    FAILED=()
+    for pkg in "${PKGS_MISSING[@]}"; do
+        dpkg -l "$pkg" 2>/dev/null | grep -q '^ii' || FAILED+=("$pkg")
+    done
+    if [[ ${#FAILED[@]} -gt 0 ]]; then
+        err "The following packages failed to install: ${FAILED[*]}\n  Try running manually: sudo apt-get install -y ${FAILED[*]}\n  If you see 'dpkg was interrupted', run: sudo dpkg --configure -a"
     fi
     log "Packages installed"
 fi
