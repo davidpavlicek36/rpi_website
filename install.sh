@@ -170,7 +170,8 @@ else
     fi
 
     info "Installing missing packages: ${PKGS_MISSING[*]}"
-    timeout 300 env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKGS_MISSING[@]}" || true
+    timeout 300 env DEBIAN_FRONTEND=noninteractive apt-get install -yq "${PKGS_MISSING[@]}" || true
+    printf '\n'
 
     # Verify packages actually landed — apt can exit non-zero for harmless reasons
     FAILED=()
@@ -199,7 +200,8 @@ if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
     skip "unattended-upgrades (already installed)"
 else
     info "Installing unattended-upgrades…"
-    timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades || true
+    timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install -yq unattended-upgrades || true
+    printf '\n'
     if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
         log "unattended-upgrades installed"
     else
@@ -226,8 +228,11 @@ if crontab -l 2>/dev/null | grep -q "cloudflared update"; then
     skip "cloudflared update cron job (already exists)"
 else
     info "Adding weekly cloudflared update cron job…"
-    (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
-    log "cloudflared will auto-update every Sunday at 3am"
+    if { crontab -l 2>/dev/null; echo "$CRON_JOB"; } | timeout 10 crontab -; then
+        log "cloudflared will auto-update every Sunday at 3am"
+    else
+        warn "Could not add cron job — add manually: sudo crontab -e"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
