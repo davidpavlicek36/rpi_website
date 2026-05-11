@@ -2,6 +2,8 @@
 
 Host your own website on a Raspberry Pi with a single command. Traffic routes through a Cloudflare Tunnel — no open router ports, no exposed home IP, SSL included.
 
+> ❗ **For static websites only.** Cloudflare Tunnel routes all traffic through Cloudflare's infrastructure — they can see the full payload of everything transmitted. Do not use this to host anything with databases, user logins, or sensitive information.
+
 ---
 
 ## Requirements
@@ -142,17 +144,3 @@ sudo systemctl status rpi-webhost
 sudo systemctl restart rpi-webhost
 ```
 
----
-
-## Disclaimer
-
-This software is provided for educational purposes and personal use only. It is intended for hosting **simple static websites** (HTML, CSS, images) with no databases, user logins, or sensitive data.
-
-By using this software you agree that:
-
-- You are solely responsible for what you host and how you configure your system
-- The author(s) provide no warranty, guarantee of security, or liability of any kind
-- You will comply with Cloudflare's Terms of Service and your internet provider's terms
-- You understand the security implications of running a publicly accessible server from a home network
-
-See the [MIT License](LICENSE) for full terms.
