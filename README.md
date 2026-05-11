@@ -18,11 +18,32 @@ Host your own website on a Raspberry Pi with a single command. Traffic routes th
 
 ## How it works
 
+When someone visits your domain, this is what happens step by step:
+
 ```
-Visitor → Cloudflare (SSL) → encrypted tunnel → Pi → nginx
+1. Visitor types your domain in their browser
+        ↓
+2. DNS resolves to Cloudflare (not your home IP)
+        ↓
+3. Cloudflare handles the HTTPS connection and SSL certificate
+        ↓
+4. Cloudflare forwards the request through the encrypted tunnel
+        ↓
+5. cloudflared (running on your Pi) receives it and passes it to nginx
+        ↓
+6. nginx reads the requested file from /var/www/html and sends it back
+        ↓
+7. Response travels back through the tunnel → Cloudflare → visitor's browser
 ```
 
-`cloudflared` runs on the Pi and creates an outbound tunnel to Cloudflare. No ports are forwarded on your router. Your home IP is never exposed to visitors.
+**What each piece does:**
+
+- **Cloudflare** — acts as the front door. Handles SSL, hides your home IP, provides DDoS protection. Your domain's DNS points here, not at your Pi directly.
+- **cloudflared** — a small background process running on the Pi that keeps a permanent outbound connection to Cloudflare. Because it connects *outward*, your router never needs any ports opened. Restarts automatically on boot.
+- **nginx** — the web server running on the Pi. Reads your HTML, CSS, and image files from `/var/www/html` and serves them. Also sets security headers on every response.
+- **ufw** — the firewall. Blocks all inbound traffic except SSH. Blocks the Pi from reaching other devices on your home network. Allows only what's needed outbound: DNS, HTTPS, and the Cloudflare tunnel.
+- **fail2ban** — watches SSH login attempts. Automatically bans any IP that fails too many times, protecting against brute-force attacks.
+- **Management GUI** — a small web app running only on the Pi's localhost. Lets you upload files, check status, and view logs. Only reachable through an SSH tunnel from your laptop — never exposed to the internet.
 
 ---
 
@@ -109,11 +130,19 @@ sudo systemctl reload sshd
 
 ## Compatibility
 
-| Pi model | Works |
-|---|---|
-| Pi Zero / Zero W (ARMv6) | Yes |
-| Pi 2 / Pi 3 (ARMv7) | Yes |
-| Pi 4 / Pi 5 (ARM64) | Yes |
+**Tested on:** Raspberry Pi Zero 1 WH — Raspberry Pi OS Lite 32-bit (Bullseye)
+
+The following models should work but have not been tested. Use the recommended OS to maximise compatibility:
+
+| Model | Recommended OS | Confidence |
+|---|---|---|
+| Pi Zero 1 / W / WH | Pi OS Lite **32-bit** (Bullseye) | ✅ Tested |
+| Pi Zero 2 W | Pi OS Lite **32-bit** (Bullseye) | 🟡 Untested — nearly identical setup |
+| Pi 2 / Pi 3 | Pi OS Lite **32-bit** (Bullseye) | 🟡 Untested — should work |
+| Pi 4 | Pi OS Lite **32-bit** (Bullseye) | 🟡 Untested — use Bullseye, not Bookworm |
+| Pi 5 | Pi OS Lite **64-bit** (Bookworm) | 🔴 Untested — Bookworm only, may need manual fixes |
+
+> Avoid the desktop version of Pi OS — Lite is recommended for any server use. Always flash using [Raspberry Pi Imager](https://www.raspberrypi.com/software/) and enable SSH in the Advanced Settings before writing.
 
 ---
 
