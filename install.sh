@@ -764,24 +764,22 @@ ZONE_ID=$(echo "$ZONE_RESP" | cf_json "r=d.get('result',[]); print(r[0]['id'] if
     "Zone not found for '${DOMAIN}'.\n  Make sure the domain is added to Cloudflare and nameservers have propagated.\n  Also verify CF_API_TOKEN has Zone:DNS:Edit permission."
 log "Zone found: $ZONE_ID"
 
-info "Creating DNS records (@ and www → tunnel)…"
+info "Creating DNS record (www → tunnel)…"
 TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
-dns_upsert "$ZONE_ID" "@"           "$TUNNEL_TARGET"
 dns_upsert "$ZONE_ID" "www.${DOMAIN}" "$TUNNEL_TARGET"
-log "DNS: @ and www.${DOMAIN} → ${TUNNEL_TARGET} (proxied)"
+log "DNS: www.${DOMAIN} → ${TUNNEL_TARGET} (proxied)"
 
 info "Configuring tunnel public hostname → localhost:80…"
 INGRESS=$(cf_api PUT \
     "/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations" \
     "{\"config\":{\"ingress\":[
-        {\"hostname\":\"${DOMAIN}\",\"service\":\"http://localhost:80\"},
         {\"hostname\":\"www.${DOMAIN}\",\"service\":\"http://localhost:80\"},
         {\"service\":\"http_status:404\"}
     ]}}")
 CF_OK=$(echo "$INGRESS" | cf_json "print(d.get('success', False))")
 [[ "$CF_OK" != "True" ]] && err \
     "Failed to configure tunnel ingress.\n  $(echo "$INGRESS" | cf_json "print(d.get('errors','unknown error'))")\n  Check that CF_API_TOKEN has Cloudflare Tunnel:Edit permission."
-log "Tunnel route: ${DOMAIN} and www.${DOMAIN} → http://localhost:80"
+log "Tunnel route: www.${DOMAIN} → http://localhost:80"
 
 fi  # end CF_API_TOKEN block
 
