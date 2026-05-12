@@ -58,19 +58,29 @@ When someone visits your domain, this is what happens step by step:
 
 **Step 2** — SSH into your Pi, then run:
 
+**Option A — fully automated** (DNS + tunnel route configured automatically):
+```bash
+git clone https://github.com/davidpavlicek36/rpi_website.git
+cd rpi_website
+sudo CF_TOKEN=<tunnel-token> CF_API_TOKEN=<api-token> DOMAIN=yourdomain.com bash install.sh
+```
+
+**Option B — manual** (you configure the domain in Cloudflare dashboard after):
 ```bash
 git clone https://github.com/davidpavlicek36/rpi_website.git
 cd rpi_website
 sudo CF_TOKEN=<your-token> bash install.sh
 ```
 
-The installer takes 2–5 minutes depending on your Pi model and internet speed. It prints next steps when done.
+The installer takes 2–5 minutes depending on your Pi model and internet speed.
 
-**Step 3** — Point your domain at the tunnel:
+**For Option A** — create a Cloudflare API token at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) with these permissions:
+- `Zone → DNS → Edit`
+- `Account → Cloudflare Tunnel → Edit`
 
-In the Cloudflare dashboard → your tunnel → **Public Hostnames** → **Add a public hostname**:
-- Domain: your domain
-- Service: `HTTP`, URL: `localhost:80`
+The domain must already be added to Cloudflare with nameservers pointing to Cloudflare before running the installer.
+
+**For Option B** — after install, go to your tunnel → **Public Hostnames** → add your domain with service `HTTP` → `localhost:80`.
 
 Cloudflare provisions SSL automatically. Your site is now live at `https://yourdomain.com`.
 

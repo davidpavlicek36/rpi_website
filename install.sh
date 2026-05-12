@@ -56,6 +56,38 @@ assert_service() {
     fi
 }
 
+# ── Cloudflare API helpers ────────────────────────────────────────────────────
+
+# Make a Cloudflare API call; returns the response body
+# Usage: cf_api <METHOD> <endpoint> [json-body]
+cf_api() {
+    local method="$1" endpoint="$2" data="${3:-}"
+    local args=(-sS -X "$method"
+        "https://api.cloudflare.com/client/v4${endpoint}"
+        -H "Authorization: Bearer ${CF_API_TOKEN}"
+        -H "Content-Type: application/json")
+    [[ -n "$data" ]] && args+=(-d "$data")
+    curl "${args[@]}"
+}
+
+# Extract a field from a JSON API response using python3
+cf_json() { python3 -c "import sys,json; d=json.load(sys.stdin); $1" 2>/dev/null; }
+
+# Create or update a proxied CNAME record
+dns_upsert() {
+    local zone_id="$1" name="$2" content="$3"
+    local existing record_id
+    existing=$(cf_api GET "/zones/${zone_id}/dns_records?type=CNAME&name=${name}")
+    record_id=$(echo "$existing" | cf_json "r=d.get('result',[]); print(r[0]['id'] if r else '')")
+    if [[ -n "$record_id" ]]; then
+        cf_api PATCH "/zones/${zone_id}/dns_records/${record_id}" \
+            "{\"content\":\"${content}\",\"proxied\":true}" > /dev/null
+    else
+        cf_api POST "/zones/${zone_id}/dns_records" \
+            "{\"type\":\"CNAME\",\"name\":\"${name}\",\"content\":\"${content}\",\"proxied\":true}" > /dev/null
+    fi
+}
+
 # ── Token input: env var (preferred) or --token-file ─────────────────────────
 # Do NOT pass the token as a bare CLI argument — it ends up in shell history
 # and briefly visible in `ps`. Use one of:
@@ -63,6 +95,8 @@ assert_service() {
 #   sudo bash install.sh --token-file /path/with/600/perms
 
 CLOUDFLARE_TOKEN="${CF_TOKEN:-}"
+CF_API_TOKEN="${CF_API_TOKEN:-}"
+DOMAIN="${DOMAIN:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -75,9 +109,11 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage:"
             echo "  sudo CF_TOKEN=<token> bash install.sh"
-            echo "  sudo bash install.sh --token-file /path/to/token-file"
+            echo "  sudo CF_TOKEN=<token> CF_API_TOKEN=<api-token> DOMAIN=yourdomain.com bash install.sh"
             echo ""
-            echo "Get a token: dash.teams.cloudflare.com → Networks → Tunnels → Create tunnel"
+            echo "  CF_TOKEN      — tunnel token from Zero Trust → Networks → Tunnels"
+            echo "  CF_API_TOKEN  — API token with DNS:Edit + Cloudflare Tunnel:Edit permissions"
+            echo "  DOMAIN        — your domain (e.g. example.com) — required with CF_API_TOKEN"
             exit 0 ;;
         *)
             err "Unknown option: $1" ;;
@@ -86,6 +122,10 @@ done
 
 [[ -z "$CLOUDFLARE_TOKEN" ]] && err \
     "Cloudflare tunnel token required.\n\n  sudo CF_TOKEN=<token> bash install.sh\n\nGet one at: dash.teams.cloudflare.com → Networks → Tunnels"
+
+if [[ -n "$CF_API_TOKEN" && -z "$DOMAIN" ]]; then
+    err "DOMAIN is required when CF_API_TOKEN is set.\n  Example: sudo CF_TOKEN=<t> CF_API_TOKEN=<a> DOMAIN=example.com bash install.sh"
+fi
 
 # ── Root check ────────────────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && err "Run with sudo: sudo CF_TOKEN=<token> bash install.sh"
@@ -697,6 +737,55 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+if [[ -n "$CF_API_TOKEN" && -n "$DOMAIN" ]]; then
+step "Cloudflare DNS & Tunnel Route"
+# ─────────────────────────────────────────────────────────────────────────────
+
+info "Decoding tunnel token…"
+TOKEN_JSON=$(python3 - <<PYEOF
+import sys, base64, json
+t = "${CLOUDFLARE_TOKEN}".strip()
+# Add padding
+t += "=" * (4 - len(t) % 4)
+print(base64.b64decode(t).decode("utf-8"))
+PYEOF
+) || err "Failed to decode tunnel token — make sure CF_TOKEN is correct."
+
+TUNNEL_ID=$(echo "$TOKEN_JSON" | cf_json "print(json.loads(sys.stdin.read())['t'])") \
+    || err "Could not extract tunnel ID from token."
+ACCOUNT_ID=$(echo "$TOKEN_JSON" | cf_json "print(json.loads(sys.stdin.read())['a'])") \
+    || err "Could not extract account ID from token."
+log "Tunnel ID: $TUNNEL_ID"
+
+info "Looking up Cloudflare zone for ${DOMAIN}…"
+ZONE_RESP=$(cf_api GET "/zones?name=${DOMAIN}")
+ZONE_ID=$(echo "$ZONE_RESP" | cf_json "r=d.get('result',[]); print(r[0]['id'] if r else '')")
+[[ -z "$ZONE_ID" ]] && err \
+    "Zone not found for '${DOMAIN}'.\n  Make sure the domain is added to Cloudflare and nameservers have propagated.\n  Also verify CF_API_TOKEN has Zone:DNS:Edit permission."
+log "Zone found: $ZONE_ID"
+
+info "Creating DNS records (@ and www → tunnel)…"
+TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
+dns_upsert "$ZONE_ID" "@"           "$TUNNEL_TARGET"
+dns_upsert "$ZONE_ID" "www.${DOMAIN}" "$TUNNEL_TARGET"
+log "DNS: @ and www.${DOMAIN} → ${TUNNEL_TARGET} (proxied)"
+
+info "Configuring tunnel public hostname → localhost:80…"
+INGRESS=$(cf_api PUT \
+    "/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations" \
+    "{\"config\":{\"ingress\":[
+        {\"hostname\":\"${DOMAIN}\",\"service\":\"http://localhost:80\"},
+        {\"hostname\":\"www.${DOMAIN}\",\"service\":\"http://localhost:80\"},
+        {\"service\":\"http_status:404\"}
+    ]}}")
+CF_OK=$(echo "$INGRESS" | cf_json "print(d.get('success', False))")
+[[ "$CF_OK" != "True" ]] && err \
+    "Failed to configure tunnel ingress.\n  $(echo "$INGRESS" | cf_json "print(d.get('errors','unknown error'))")\n  Check that CF_API_TOKEN has Cloudflare Tunnel:Edit permission."
+log "Tunnel route: ${DOMAIN} and www.${DOMAIN} → http://localhost:80"
+
+fi  # end CF_API_TOKEN block
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Done
 # ─────────────────────────────────────────────────────────────────────────────
 IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-pi-ip")
@@ -707,9 +796,13 @@ echo -e "${BOLD}${GREEN}║                  Installation Complete!             
 echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${BOLD}Mode:${NC}  Cloudflare Tunnel — no open ports on your router"
+if [[ -n "$DOMAIN" ]]; then
+echo -e "  ${BOLD}Site:${NC}  https://${DOMAIN}"
+else
 echo -e "  ${BOLD}Site:${NC}  Configure a Public Hostname in Cloudflare Zero Trust:"
 echo    "         dash.cloudflare.com → Zero Trust → Networks → Tunnels"
 echo    "         Public Hostname → http://localhost:80"
+fi
 echo ""
 echo -e "  ${BOLD}Management GUI — SSH tunnel from your laptop:${NC}"
 echo -e "  ${BLUE}1.${NC} ${YELLOW}ssh -L 8080:localhost:8080 pi@$IP${NC}"
