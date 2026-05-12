@@ -751,9 +751,9 @@ print(base64.b64decode(t).decode("utf-8"))
 PYEOF
 ) || err "Failed to decode tunnel token — make sure CF_TOKEN is correct."
 
-TUNNEL_ID=$(echo "$TOKEN_JSON" | cf_json "print(json.loads(sys.stdin.read())['t'])") \
+TUNNEL_ID=$(echo "$TOKEN_JSON" | cf_json "print(d['t'])") \
     || err "Could not extract tunnel ID from token."
-ACCOUNT_ID=$(echo "$TOKEN_JSON" | cf_json "print(json.loads(sys.stdin.read())['a'])") \
+ACCOUNT_ID=$(echo "$TOKEN_JSON" | cf_json "print(d['a'])") \
     || err "Could not extract account ID from token."
 log "Tunnel ID: $TUNNEL_ID"
 
