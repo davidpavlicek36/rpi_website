@@ -58,31 +58,43 @@ When someone visits your domain, this is what happens step by step:
 
 **Step 2** — SSH into your Pi, then run:
 
-**Option A — fully automated** (DNS + tunnel route configured automatically):
+**Option A — fully automated** (recommended)
+
+The installer configures DNS records and the tunnel route automatically. Nothing to do in the Cloudflare dashboard after.
+
 ```bash
 git clone https://github.com/davidpavlicek36/rpi_website.git
 cd rpi_website
 sudo CF_TOKEN=<tunnel-token> CF_API_TOKEN=<api-token> DOMAIN=yourdomain.com bash install.sh
 ```
 
-**Option B — manual** (you configure the domain in Cloudflare dashboard after):
-```bash
-git clone https://github.com/davidpavlicek36/rpi_website.git
-cd rpi_website
-sudo CF_TOKEN=<your-token> bash install.sh
-```
+| Variable | What it is | Example |
+|---|---|---|
+| `CF_TOKEN` | Tunnel token from Zero Trust → Networks → Tunnels | `eyJhIjoiZ...` |
+| `CF_API_TOKEN` | Cloudflare API token (see below) | `abc123...` |
+| `DOMAIN` | Root domain only — no `www`, no `https://` | `yourdomain.com` |
 
-The installer takes 2–5 minutes depending on your Pi model and internet speed.
-
-**For Option A** — create a Cloudflare API token at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) with these permissions:
+To create `CF_API_TOKEN`: go to [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) → **Create Token** → **Create Custom Token**, add these two permissions:
 - `Zone → DNS → Edit`
 - `Account → Cloudflare Tunnel → Edit`
 
-The domain must already be added to Cloudflare with nameservers pointing to Cloudflare before running the installer.
+> The domain must already be added to Cloudflare with nameservers pointing to Cloudflare before running the installer.
 
-**For Option B** — after install, go to your tunnel → **Public Hostnames** → add your domain with service `HTTP` → `localhost:80`.
+---
 
-Cloudflare provisions SSL automatically. Your site is now live at `https://yourdomain.com`.
+**Option B — manual**
+
+Skip `CF_API_TOKEN` and `DOMAIN`. After the installer finishes, go to your tunnel in the Cloudflare dashboard → **Public Hostnames** → add your domain with service `HTTP` → `localhost:80`.
+
+```bash
+git clone https://github.com/davidpavlicek36/rpi_website.git
+cd rpi_website
+sudo CF_TOKEN=<tunnel-token> bash install.sh
+```
+
+---
+
+The installer takes 2–5 minutes depending on your Pi model and internet speed. Cloudflare provisions SSL automatically. Your site will be live at `https://yourdomain.com`.
 
 ---
 
