@@ -6,6 +6,8 @@ Host your own website on a Raspberry Pi with a single command. Traffic routes th
 
 > 🛠️ **Hobby project.** This software has not been tested over a long period of time and comes with no guarantees of stability, security, or continued maintenance. Use at your own risk.
 
+![rpi_website_graph](photos/rpi_website_graph.png)
+
 ---
 
 ## Requirements
