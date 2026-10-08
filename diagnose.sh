@@ -169,7 +169,7 @@ note "Listening on non-loopback besides ssh: ${public:-none}"
 section "Management GUI"
 systemctl is-active rpi-webhost >/dev/null 2>&1 && pass "rpi-webhost service is active" || warn "rpi-webhost service is not active" "Only affects the management GUI, not the public site"
 if t curl -fsS http://127.0.0.1:8080/api/status >/dev/null 2>&1; then pass "GUI answers on 127.0.0.1:8080"; else warn "GUI not answering on 127.0.0.1:8080"; fi
-fl=$(python3 -c 'import flask, werkzeug; print("Flask", flask.__version__ if hasattr(flask,"__version__") else "?", "Werkzeug", werkzeug.__version__)' 2>&1 | tail -1)
+fl=$(python3 -c 'import importlib.metadata as m; print("Flask", m.version("flask"), "Werkzeug", m.version("werkzeug"))' 2>&1 | tail -1)
 note "$fl"
 for f in "$INSTALL_DIR/config.env" "$INSTALL_DIR/secret_key"; do
     [[ -e "$f" ]] && { m=$(stat -c %a "$f"); [[ "$m" == "600" ]] && pass "$f mode 600" || warn "$f has mode $m (expected 600)"; }
