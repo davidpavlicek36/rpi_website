@@ -29,10 +29,48 @@
 </div>
 
 <div class="card">
-  <h2>Domain (for reference)</h2>
+  <h2>Update domain &amp; DNS</h2>
   <p class="text-muted" style="margin:.5rem 0 1.2rem">
-    Your domain is configured in the Cloudflare dashboard, not here. Save it below
-    just so the dashboard can display it.
+    Points <code>www.</code>your domain at this Pi's tunnel and updates the tunnel's public hostname.
+    Needs a Cloudflare <strong>API token</strong> with Zone:Read, DNS:Edit and Cloudflare Tunnel:Edit.
+    It is used once and never stored. Other hostnames on the tunnel are kept.
+  </p>
+  <form method="POST" autocomplete="off" onsubmit="this.querySelector('button').textContent='Updating…'; this.querySelector('button').disabled=true;">
+    <input type="hidden" name="action" value="set_domain">
+    <div class="form-row">
+      <label for="domain_update">Domain name</label>
+      <input type="text" name="domain" id="domain_update" class="input"
+             placeholder="example.com" value="{{ cfg.get('DOMAIN', '') }}" required>
+    </div>
+    <div class="form-row">
+      <label for="api_token">Cloudflare API token</label>
+      <input type="password" name="api_token" id="api_token" class="input" autocomplete="off" required>
+    </div>
+    <button type="submit" class="btn">Update domain &amp; DNS</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Replace tunnel token</h2>
+  <p class="text-muted" style="margin:.5rem 0 1.2rem">
+    Use this to move the Pi to a different tunnel. The new token is checked, applied, and the tunnel
+    must connect within about 40 seconds; otherwise the previous token is restored automatically.
+    You can paste the token or the whole <code>cloudflared service install …</code> command.
+  </p>
+  <form method="POST" autocomplete="off" onsubmit="this.querySelector('button').textContent='Applying… (up to a minute)'; this.querySelector('button').disabled=true;">
+    <input type="hidden" name="action" value="set_token">
+    <div class="form-row">
+      <label for="tunnel_token">New tunnel token</label>
+      <input type="password" name="tunnel_token" id="tunnel_token" class="input" autocomplete="off" required>
+    </div>
+    <button type="submit" class="btn">Replace tunnel token</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Saved domain (display only)</h2>
+  <p class="text-muted" style="margin:.5rem 0 1.2rem">
+    Only changes the name shown on the dashboard. It does not touch Cloudflare DNS.
   </p>
   <form method="POST">
     <input type="hidden" name="action" value="save_domain">
