@@ -175,6 +175,42 @@ for f in "$INSTALL_DIR/config.env" "$INSTALL_DIR/secret_key"; do
     [[ -e "$f" ]] && { m=$(stat -c %a "$f"); [[ "$m" == "600" ]] && pass "$f mode 600" || warn "$f has mode $m (expected 600)"; }
 done
 
+# ── Config helper ─────────────────────────────────────────────────────────────
+section "Config helper"
+HELPER=/usr/local/sbin/rpi-webhost-config
+if [[ -x $HELPER ]]; then
+    pass "$HELPER is installed"
+    if hs=$($SUDO "$HELPER" status 2>/dev/null); then
+        while IFS= read -r l; do note "$l"; done <<<"$hs"
+    else
+        warn "Could not run '$HELPER status' (need sudo?)"
+    fi
+    if [[ -f /etc/sudoers.d/rpi-webhost ]] && grep -q rpi-webhost-config /etc/sudoers.d/rpi-webhost; then
+        pass "sudoers allows the GUI to use the helper"
+    else
+        warn "sudoers has no rule for the helper" "Re-run install.sh to refresh managed files; the GUI's token/domain forms will not work"
+    fi
+else
+    warn "$HELPER not installed" "Pre-dates the change-token/domain feature; re-run install.sh to upgrade (your site and config are kept)"
+fi
+
+# Tunnel token exposure: must not be on the command line or in a world-readable file
+if systemctl cat cloudflared 2>/dev/null | grep -q -- '--token'; then
+    warn "The tunnel token is on the cloudflared command line (visible to every local user via ps)" "Run: sudo rpi-webhost-config harden-token"
+else
+    pass "Tunnel token is not on the cloudflared command line"
+fi
+tokf=/etc/cloudflared/tunnel.env
+if [[ -e $tokf ]]; then
+    m=$(stat -c %a "$tokf" 2>/dev/null); [[ "$m" == "600" ]] && pass "$tokf is root-only (600)" || warn "$tokf has mode $m (expected 600)"
+fi
+gm=$(stat -c %U "$INSTALL_DIR/gui/app.py" 2>/dev/null)
+if [[ -n "$gm" ]]; then [[ "$gm" == "root" ]] && pass "GUI code is root-owned (the web app cannot modify itself)" || warn "GUI code is owned by '$gm'" "Re-run install.sh to fix ownership"; fi
+if have journalctl; then
+    n=$($SUDO journalctl -t rpi-webhost-config --since "30 days ago" --no-pager -q 2>/dev/null | wc -l)
+    note "Config changes logged in the last 30 days (journalctl -t rpi-webhost-config): $n"
+fi
+
 # ── Security config ───────────────────────────────────────────────────────────
 section "Security config"
 systemctl is-active fail2ban >/dev/null 2>&1 && pass "fail2ban is active" || warn "fail2ban is not active"
@@ -187,8 +223,8 @@ if [[ -f /etc/sudoers.d/rpi-webhost ]]; then $SUDO visudo -cf /etc/sudoers.d/rpi
 
 # ── Public site & API ─────────────────────────────────────────────────────────
 section "Public site"
-DOMAIN=""
-[[ -r "$INSTALL_DIR/config.env" ]] && DOMAIN=$(grep -E '^DOMAIN=' "$INSTALL_DIR/config.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+DOMAIN="${DOMAIN:-}"
+[[ -z "$DOMAIN" && -r "$INSTALL_DIR/config.env" ]] && DOMAIN=$(grep -E '^DOMAIN=' "$INSTALL_DIR/config.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
 if [[ -z "$DOMAIN" ]]; then
     note "No DOMAIN found in config.env (set one in the GUI or pass DOMAIN=example.com) — skipping public check"
 else

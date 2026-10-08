@@ -56,38 +56,6 @@ assert_service() {
     fi
 }
 
-# ── Cloudflare API helpers ────────────────────────────────────────────────────
-
-# Make a Cloudflare API call; returns the response body
-# Usage: cf_api <METHOD> <endpoint> [json-body]
-cf_api() {
-    local method="$1" endpoint="$2" data="${3:-}"
-    local args=(-sS -X "$method"
-        "https://api.cloudflare.com/client/v4${endpoint}"
-        -H "Authorization: Bearer ${CF_API_TOKEN}"
-        -H "Content-Type: application/json")
-    [[ -n "$data" ]] && args+=(-d "$data")
-    curl "${args[@]}"
-}
-
-# Extract a field from a JSON API response using python3
-cf_json() { python3 -c "import sys,json; d=json.load(sys.stdin); $1" 2>/dev/null; }
-
-# Create or update a proxied CNAME record
-dns_upsert() {
-    local zone_id="$1" name="$2" content="$3"
-    local existing record_id
-    existing=$(cf_api GET "/zones/${zone_id}/dns_records?type=CNAME&name=${name}")
-    record_id=$(echo "$existing" | cf_json "r=d.get('result',[]); print(r[0]['id'] if r else '')")
-    if [[ -n "$record_id" ]]; then
-        cf_api PATCH "/zones/${zone_id}/dns_records/${record_id}" \
-            "{\"content\":\"${content}\",\"proxied\":true}" > /dev/null
-    else
-        cf_api POST "/zones/${zone_id}/dns_records" \
-            "{\"type\":\"CNAME\",\"name\":\"${name}\",\"content\":\"${content}\",\"proxied\":true}" > /dev/null
-    fi
-}
-
 # ── Token input: env var (preferred) or --token-file ─────────────────────────
 # Do NOT pass the token as a bare CLI argument — it ends up in shell history
 # and briefly visible in `ps`. Use one of:
@@ -112,7 +80,7 @@ while [[ $# -gt 0 ]]; do
             echo "  sudo CF_TOKEN=<token> CF_API_TOKEN=<api-token> DOMAIN=yourdomain.com bash install.sh"
             echo ""
             echo "  CF_TOKEN      — tunnel token from Zero Trust → Networks → Tunnels"
-            echo "  CF_API_TOKEN  — API token with DNS:Edit + Cloudflare Tunnel:Edit permissions"
+            echo "  CF_API_TOKEN  — API token with Zone:Read + DNS:Edit + Cloudflare Tunnel:Edit permissions"
             echo "  DOMAIN        — your domain (e.g. example.com) — required with CF_API_TOKEN"
             exit 0 ;;
         *)
@@ -347,30 +315,39 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 step "Management GUI"
 # ─────────────────────────────────────────────────────────────────────────────
-if [[ -f "$INSTALL_DIR/gui/app.py" ]]; then
-    skip "GUI files (already at $INSTALL_DIR/gui)"
+# Managed code (gui/, helper) is refreshed on every run so re-running the installer
+# upgrades it. User data (config.env, secret_key, web root) is never touched here.
+info "Installing GUI files and config helper…"
+mkdir -p "$INSTALL_DIR"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+SRC_TMP=""
+if [[ -d "$SCRIPT_DIR/gui" && -f "$SCRIPT_DIR/bin/rpi-webhost-config" ]]; then
+    detail "Source: local clone at $SCRIPT_DIR"
+    SRC="$SCRIPT_DIR"
 else
-    info "Copying GUI files to $INSTALL_DIR…"
-    mkdir -p "$INSTALL_DIR"
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [[ -d "$SCRIPT_DIR/gui" ]]; then
-        detail "Source: local clone at $SCRIPT_DIR"
-        cp -r "$SCRIPT_DIR/gui" "$INSTALL_DIR/"
-    else
-        detail "Source: downloading from GitHub…"
-        REPO="https://github.com/davidpavlicek36/rpi_website"
-        if ! timeout 60 curl -fsSL --progress-bar "$REPO/archive/main.tar.gz" | tar xz -C /tmp; then
-            err "Failed to download GUI files from GitHub.\n  Check your internet connection or clone the repo manually:\n  git clone $REPO && cd rpi_website && sudo CF_TOKEN=<token> bash install.sh"
-        fi
-        cp -r /tmp/rpi_website-main/gui "$INSTALL_DIR/"
-        rm -rf /tmp/rpi_website-main
+    detail "Source: downloading from GitHub…"
+    REPO="https://github.com/davidpavlicek36/rpi_website"
+    REF="${RPI_WEBHOST_REF:-main}"   # pin to a tag or commit: sudo RPI_WEBHOST_REF=v1.0 bash install.sh
+    SRC_TMP=$(mktemp -d)
+    if ! timeout 60 curl -fsSL --progress-bar "$REPO/archive/${REF}.tar.gz" | tar xz --strip-components=1 -C "$SRC_TMP"; then
+        rm -rf "$SRC_TMP"
+        err "Failed to download GUI files from GitHub.\n  Check your internet connection or clone the repo manually:\n  git clone $REPO && cd rpi_website && sudo CF_TOKEN=<token> bash install.sh"
     fi
-    log "GUI files installed"
+    SRC="$SRC_TMP"
 fi
+rm -rf "$INSTALL_DIR/gui"
+cp -r "$SRC/gui" "$INSTALL_DIR/"
+install -o root -g root -m 755 "$SRC/bin/rpi-webhost-config" /usr/local/sbin/rpi-webhost-config
+[[ -n "$SRC_TMP" ]] && rm -rf "$SRC_TMP"
+log "GUI files and /usr/local/sbin/rpi-webhost-config installed"
 
 # Service user owns the install dir (config, secret key)
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
 chmod 750 "$INSTALL_DIR"
+# The GUI's own code is root-owned and read-only to the service user, so a bug in the
+# web app cannot rewrite itself (the service user can call the root helper via sudo).
+chown -R root:root "$INSTALL_DIR/gui"
+chmod -R u=rwX,go=rX,go-w "$INSTALL_DIR/gui"
 
 if [[ ! -f "$INSTALL_DIR/config.env" ]]; then
     touch "$INSTALL_DIR/config.env"
@@ -507,8 +484,10 @@ ufw deny out to fe80::/10   # IPv6 link-local
 info "Allowing outbound internet traffic (DNS, NTP, HTTPS, Cloudflare QUIC)…"
 ufw allow out 53        # DNS — to 1.1.1.1 (RFC1918 already denied above)
 ufw allow out 123/udp   # NTP clock sync
+ufw allow out 80/tcp    # plain-HTTP apt mirrors — without this security updates silently stop (packages are GPG-signed)
 ufw allow out 443/tcp   # HTTPS — apt, pip, cloudflared
-ufw allow out 7844/udp  # Cloudflare QUIC (fallback tunnel transport)
+ufw allow out 7844/udp  # Cloudflare tunnel (QUIC)
+ufw allow out 7844/tcp  # Cloudflare tunnel (HTTP/2 fallback when UDP is filtered)
 
 info "Enabling firewall… (may take up to 60 s — Pi is still working)"
 ( printf '.'; while true; do sleep 2; printf '.'; done ) &
@@ -594,46 +573,83 @@ else
     fi
 
     info "Reloading SSH daemon…"
-    if ! timeout 15 systemctl reload sshd; then
-        err "sshd reload failed.\n  Your SSH session is still active but hardening was not applied.\n  Run 'sudo systemctl status sshd' for details."
+    if ! timeout 15 systemctl reload ssh 2>/dev/null && ! timeout 15 systemctl reload sshd; then
+        err "sshd reload failed.\n  Your SSH session is still active but hardening was not applied.\n  Run 'sudo systemctl status ssh' for details."
     fi
     log "SSH hardened"
 fi
 
+# Password logins: only switched off when a user already has an authorized key, so the
+# installer can never lock you out of a Pi that has no key yet. Opt out: KEEP_SSH_PASSWORD=1
+PASSWORD_AUTH_OFF=0
+if [[ "$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2}')" == "no" ]]; then
+    PASSWORD_AUTH_OFF=1
+    skip "SSH password login already disabled"
+elif [[ "${KEEP_SSH_PASSWORD:-}" == "1" ]]; then
+    warn "KEEP_SSH_PASSWORD=1 — leaving SSH password login enabled"
+else
+    HAVE_KEY=0
+    for f in /home/*/.ssh/authorized_keys /root/.ssh/authorized_keys; do
+        [[ -s "$f" ]] && HAVE_KEY=1
+    done
+    if (( HAVE_KEY )); then
+        info "An SSH key is installed — disabling SSH password login…"
+        cp "$SSHD" "${SSHD}.bak.pw.$(date +%s)"
+        if grep -q '^#\?PasswordAuthentication' "$SSHD"; then
+            sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD"
+        else
+            echo "PasswordAuthentication no" >> "$SSHD"
+        fi
+        if sshd -t 2>/dev/null && { timeout 15 systemctl reload ssh 2>/dev/null || timeout 15 systemctl reload sshd; }; then
+            if [[ "$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2}')" == "no" ]]; then
+                PASSWORD_AUTH_OFF=1
+                log "SSH password login disabled (key login only)"
+            else
+                warn "A drop-in in /etc/ssh/sshd_config.d/ still enables password login — check: sudo sshd -T | grep passwordauth"
+            fi
+        else
+            cp "$(ls -t ${SSHD}.bak.pw.* | head -1)" "$SSHD"
+            warn "Could not apply the password-login change — original sshd config restored"
+        fi
+    else
+        warn "No SSH key found on this Pi, so password login stays ON (turning it off would lock you out)."
+    fi
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
-step "Sudoers (least-privilege tunnel restart)"
+step "Sudoers (least-privilege tunnel & config access)"
 # ─────────────────────────────────────────────────────────────────────────────
 SUDOERS_FILE="/etc/sudoers.d/rpi-webhost"
-if [[ -f "$SUDOERS_FILE" ]]; then
-    skip "sudoers file (already exists)"
-else
-    info "Writing sudoers entries for $SERVICE_USER…"
-    cat > "$SUDOERS_FILE" << 'SUDOERS'
+info "Writing sudoers entries for $SERVICE_USER…"
+SUDOERS_TMP=$(mktemp)
+cat > "$SUDOERS_TMP" << 'SUDOERS'
 # Tunnel restart — explicit path works on both Bullseye (/bin) and Bookworm (/usr/bin)
 rpi-webhost ALL=(root) NOPASSWD: /usr/bin/systemctl restart cloudflared
 rpi-webhost ALL=(root) NOPASSWD: /usr/bin/systemctl status cloudflared
 # Log reading — scoped to nginx logs only, no adm group needed
 rpi-webhost ALL=(root) NOPASSWD: /usr/bin/tail -n 80 -f /var/log/nginx/access.log
 rpi-webhost ALL=(root) NOPASSWD: /usr/bin/tail -n 80 -f /var/log/nginx/error.log
+# Change tunnel token / domain from the GUI — secrets go via stdin, args are validated by the helper
+rpi-webhost ALL=(root) NOPASSWD: /usr/local/sbin/rpi-webhost-config set-token
+rpi-webhost ALL=(root) NOPASSWD: /usr/local/sbin/rpi-webhost-config set-domain *
+rpi-webhost ALL=(root) NOPASSWD: /usr/local/sbin/rpi-webhost-config status
 SUDOERS
-    chmod 440 "$SUDOERS_FILE"
+chmod 440 "$SUDOERS_TMP"
 
-    info "Validating sudoers file…"
-    if ! visudo -cf "$SUDOERS_FILE" > /dev/null 2>&1; then
-        rm -f "$SUDOERS_FILE"
-        err "sudoers file failed validation and was removed. This is a bug — please report it."
-    fi
-    log "Sudoers configured"
+info "Validating sudoers file…"
+if ! visudo -cf "$SUDOERS_TMP" > /dev/null 2>&1; then
+    rm -f "$SUDOERS_TMP"
+    err "sudoers file failed validation and was not installed. This is a bug — please report it."
 fi
+install -o root -g root -m 440 "$SUDOERS_TMP" "$SUDOERS_FILE"
+rm -f "$SUDOERS_TMP"
+log "Sudoers configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "Management GUI service"
 # ─────────────────────────────────────────────────────────────────────────────
-if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
-    skip "GUI service file (already exists)"
-else
-    info "Writing systemd service file…"
-    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << SERVICE
+info "Writing systemd service file…"
+cat > "/etc/systemd/system/${SERVICE_NAME}.service" << SERVICE
 [Unit]
 Description=RPi Website Management GUI
 After=network.target nginx.service
@@ -646,12 +662,20 @@ ExecStart=/usr/bin/python3 ${INSTALL_DIR}/gui/app.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+# Sandboxing that does not get in the way of the sudo'd root helper (a filesystem sandbox such as
+# ProtectSystem=strict or NoNewPrivileges=true would also apply to it and break set-token / sudo).
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
 SERVICE
-    log "Service file written (running as $SERVICE_USER, not root)"
-fi
+log "Service file written (running as $SERVICE_USER, not root)"
 
 info "Reloading systemd daemon…"
 systemctl daemon-reload
@@ -669,11 +693,41 @@ log "Management GUI running on 127.0.0.1:8080"
 # ─────────────────────────────────────────────────────────────────────────────
 step "Cloudflare Tunnel"
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Check a download against the SHA-256 that GitHub publishes for the release asset.
+# Usage: verify_cloudflared <file> <asset-name>
+verify_cloudflared() {
+    local file=$1 asset=$2 expected actual
+    expected=$(curl -fsSL --max-time 30 https://api.github.com/repos/cloudflare/cloudflared/releases/latest 2>/dev/null \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((a.get('digest') or '' for a in d['assets'] if a['name']==sys.argv[1]),''))" "$asset" 2>/dev/null || true)
+    expected=${expected#sha256:}
+    if [[ -z "$expected" ]]; then
+        if [[ "${CLOUDFLARED_SKIP_VERIFY:-}" == "1" ]]; then
+            warn "Could not look up the published checksum — continuing because CLOUDFLARED_SKIP_VERIFY=1"
+            return 0
+        fi
+        rm -f "$file"
+        err "Could not look up the published SHA-256 for ${asset} (GitHub API unreachable or rate-limited).\n  Try again in a few minutes. To skip this check (not recommended): CLOUDFLARED_SKIP_VERIFY=1"
+    fi
+    actual=$(sha256sum "$file" | awk '{print $1}')
+    if [[ "$actual" != "$expected" ]]; then
+        rm -f "$file"
+        err "Checksum mismatch for ${asset}.\n  expected: ${expected}\n  actual:   ${actual}\n  The download was corrupted or tampered with. Nothing was installed."
+    fi
+    log "Checksum verified (${actual:0:16}…)"
+}
+
 if systemctl is-active cloudflared &>/dev/null; then
     skip "cloudflared (service already running)"
-    warn "To re-register with a new token:"
-    warn "  sudo cloudflared service uninstall"
-    warn "  sudo CF_TOKEN=<NEW_TOKEN> bash install.sh"
+    # Older installs kept the tunnel token on the cloudflared command line, readable by every local user via `ps`
+    info "Making sure the tunnel token is not visible in the process list…"
+    if HELPER_OUT=$(/usr/local/sbin/rpi-webhost-config harden-token 2>&1); then
+        log "$HELPER_OUT"
+    else
+        warn "Could not move the tunnel token: $HELPER_OUT"
+    fi
+    warn "To switch to a different tunnel, use the GUI (Tunnel & Domain) or:"
+    warn "  sudo rpi-webhost-config set-token"
 else
     case $ARCH in
         aarch64) CF_METHOD="deb";    CF_ARCH="arm64" ;;
@@ -688,100 +742,66 @@ else
     if command -v cloudflared &>/dev/null; then
         skip "cloudflared binary (already installed: $(cloudflared --version 2>&1 | head -1))"
     else
+        CF_TMP=$(mktemp)
         if [[ "$CF_METHOD" == "deb" ]]; then
-            CF_URL="${CF_BASE}/cloudflared-linux-${CF_ARCH}.deb"
+            CF_ASSET="cloudflared-linux-${CF_ARCH}.deb"
             info "Downloading cloudflared .deb for ${CF_ARCH}…"
             detail "This may take a few minutes — you will see a progress bar"
             echo ""
-            if ! timeout 180 curl -fsSL --progress-bar -o /tmp/cloudflared.deb "$CF_URL"; then
+            if ! timeout 180 curl -fsSL --progress-bar -o "$CF_TMP" "${CF_BASE}/${CF_ASSET}"; then
+                rm -f "$CF_TMP"
                 err "Failed to download cloudflared.\n  Check your internet connection and try again."
             fi
             echo ""
+            verify_cloudflared "$CF_TMP" "$CF_ASSET"
             info "Installing cloudflared package…"
-            if ! dpkg -i /tmp/cloudflared.deb; then
-                rm -f /tmp/cloudflared.deb
+            if ! dpkg -i "$CF_TMP"; then
+                rm -f "$CF_TMP"
                 err "cloudflared package install failed.\n  Run 'sudo apt-get install -f' to fix broken dependencies, then retry."
             fi
-            rm /tmp/cloudflared.deb
         else
             # 32-bit ARM: Cloudflare's .deb is armel but Raspberry Pi OS is armhf
-            CF_URL="${CF_BASE}/cloudflared-linux-${CF_ARCH}"
+            CF_ASSET="cloudflared-linux-${CF_ARCH}"
             info "Downloading cloudflared binary for ${CF_ARCH} (32-bit ARM, raw binary)…"
             detail "Note: using raw binary — armhf is incompatible with the .deb package"
             detail "This may take a few minutes on Pi Zero — you will see a progress bar"
             echo ""
-            if ! timeout 300 curl -fsSL --progress-bar -o /usr/local/bin/cloudflared "$CF_URL"; then
+            if ! timeout 300 curl -fsSL --progress-bar -o "$CF_TMP" "${CF_BASE}/${CF_ASSET}"; then
+                rm -f "$CF_TMP"
                 err "Failed to download cloudflared binary.\n  Check your internet connection and try again."
             fi
             echo ""
-            chmod +x /usr/local/bin/cloudflared
+            verify_cloudflared "$CF_TMP" "$CF_ASSET"
+            install -o root -g root -m 755 "$CF_TMP" /usr/local/bin/cloudflared
         fi
-        log "cloudflared installed ($(cloudflared --version 2>&1 | head -1))"
+        rm -f "$CF_TMP"
+        if ! CF_VER=$(timeout 20 cloudflared --version 2>&1 | head -1); then CF_VER=""; fi
+        [[ -z "$CF_VER" ]] && err "cloudflared was installed but does not run on this device (architecture $ARCH).\n  If you see 'Illegal instruction', this cloudflared build no longer supports your CPU."
+        log "cloudflared installed ($CF_VER)"
     fi
 
-    info "Registering tunnel with Cloudflare… (10–30 s)"
-    if ! timeout 60 cloudflared service install "$CLOUDFLARE_TOKEN"; then
-        err "cloudflared tunnel registration failed.\n  Common causes:\n  - Invalid or expired token — get a new one at dash.teams.cloudflare.com → Networks → Tunnels\n  - No outbound internet on port 443 (check firewall / router)"
-    fi
-
-    info "Enabling cloudflared service…"
-    systemctl enable cloudflared
-    info "Starting cloudflared…"
-    if ! timeout 30 systemctl start cloudflared; then
-        warn "cloudflared failed to start. Logs:"
+    info "Registering tunnel with Cloudflare… (up to 90 s)"
+    # The helper stores the token in a root-only file (not on the command line) and
+    # waits for the tunnel to connect.
+    if ! HELPER_OUT=$(printf '%s\n' "$CLOUDFLARE_TOKEN" | RPI_WEBHOST_CONNECT_TIMEOUT=90 /usr/local/sbin/rpi-webhost-config set-token 2>&1); then
         journalctl -u cloudflared -n 15 --no-pager 2>/dev/null || true
-        err "cloudflared did not start.\n  If you see a DNS error, your DNS may not have applied yet.\n  Try: echo 'nameserver 1.1.1.1' | sudo tee /etc/resolv.conf && sudo systemctl start cloudflared"
+        err "${HELPER_OUT}\n  Common causes:\n  - Invalid or expired token — get a new one at dash.teams.cloudflare.com → Networks → Tunnels\n  - Outbound 443 / 7844 blocked by your router or network\n  Run 'sudo bash diagnose.sh' for a full check, then re-run the installer."
     fi
-    assert_service cloudflared
-    log "Cloudflare Tunnel installed and running"
+    log "Cloudflare Tunnel installed and connected"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ -n "$CF_API_TOKEN" && -n "$DOMAIN" ]]; then
 step "Cloudflare DNS & Tunnel Route"
 # ─────────────────────────────────────────────────────────────────────────────
-
-info "Decoding tunnel token…"
-TOKEN_JSON=$(python3 - <<PYEOF
-import sys, base64, json
-t = "${CLOUDFLARE_TOKEN}".strip()
-# Add padding
-t += "=" * (4 - len(t) % 4)
-print(base64.b64decode(t).decode("utf-8"))
-PYEOF
-) || err "Failed to decode tunnel token — make sure CF_TOKEN is correct."
-
-TUNNEL_ID=$(echo "$TOKEN_JSON" | cf_json "print(d['t'])") \
-    || err "Could not extract tunnel ID from token."
-ACCOUNT_ID=$(echo "$TOKEN_JSON" | cf_json "print(d['a'])") \
-    || err "Could not extract account ID from token."
-log "Tunnel ID: $TUNNEL_ID"
-
-info "Looking up Cloudflare zone for ${DOMAIN}…"
-ZONE_RESP=$(cf_api GET "/zones?name=${DOMAIN}")
-ZONE_ID=$(echo "$ZONE_RESP" | cf_json "r=d.get('result',[]); print(r[0]['id'] if r else '')")
-[[ -z "$ZONE_ID" ]] && err \
-    "Zone not found for '${DOMAIN}'.\n  Make sure the domain is added to Cloudflare and nameservers have propagated.\n  Also verify CF_API_TOKEN has Zone:DNS:Edit permission."
-log "Zone found: $ZONE_ID"
-
-info "Creating DNS record (www → tunnel)…"
-TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
-dns_upsert "$ZONE_ID" "www.${DOMAIN}" "$TUNNEL_TARGET"
-log "DNS: www.${DOMAIN} → ${TUNNEL_TARGET} (proxied)"
-
-info "Configuring tunnel public hostname → localhost:80…"
-INGRESS=$(cf_api PUT \
-    "/accounts/${ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations" \
-    "{\"config\":{\"ingress\":[
-        {\"hostname\":\"www.${DOMAIN}\",\"service\":\"http://localhost:80\"},
-        {\"service\":\"http_status:404\"}
-    ]}}")
-CF_OK=$(echo "$INGRESS" | cf_json "print(d.get('success', False))")
-[[ "$CF_OK" != "True" ]] && err \
-    "Failed to configure tunnel ingress.\n  $(echo "$INGRESS" | cf_json "print(d.get('errors','unknown error'))")\n  Check that CF_API_TOKEN has Cloudflare Tunnel:Edit permission."
-log "Tunnel route: www.${DOMAIN} → http://localhost:80"
-
-fi  # end CF_API_TOKEN block
+info "Pointing www.${DOMAIN} at the tunnel…"
+if ! HELPER_OUT=$(printf '%s\n' "$CF_API_TOKEN" | /usr/local/sbin/rpi-webhost-config set-domain "$DOMAIN" 2>&1); then
+    err "${HELPER_OUT}\n  Check CF_API_TOKEN has Zone:Read, DNS:Edit and Cloudflare Tunnel:Edit permissions.\n  You can retry later without re-installing:  printf '%s\\n' <api-token> | sudo rpi-webhost-config set-domain ${DOMAIN}"
+fi
+log "$HELPER_OUT"
+elif [[ -n "$DOMAIN" ]]; then
+    /usr/local/sbin/rpi-webhost-config save-domain "$DOMAIN" > /dev/null || warn "Could not save DOMAIN to config.env"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Done
@@ -807,8 +827,9 @@ echo -e "  ${BLUE}1.${NC} ${YELLOW}ssh -L 8080:localhost:8080 pi@$IP${NC}"
 echo -e "  ${BLUE}2.${NC} Open ${YELLOW}http://localhost:8080${NC} in your browser"
 echo ""
 echo    "  ──────────────────────────────────────────────────────────"
-warn "SECURITY: Add your SSH key, then disable password auth:"
+if [[ "${PASSWORD_AUTH_OFF:-0}" != "1" ]]; then
+warn "SECURITY: SSH password login is still enabled. Add your SSH key, then re-run this installer"
+warn "  (it turns password login off automatically once a key is present):"
 warn "  ssh-copy-id pi@$IP"
-warn "  sudo sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config"
-warn "  sudo systemctl reload sshd"
+fi
 echo ""

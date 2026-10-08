@@ -173,8 +173,27 @@ http://localhost:8080
 |---|---|
 | **Dashboard** | nginx + tunnel status, file list |
 | **Upload Files** | Drag-and-drop HTML, CSS, images, fonts — individual files or whole folders |
-| **Tunnel & Domain** | Check tunnel status, restart it, save your domain for reference |
+| **Tunnel & Domain** | Check tunnel status, restart it, replace the tunnel token, update domain & DNS |
 | **Logs** | Live nginx access and error logs |
+
+### Change your tunnel token or domain later
+
+You don't need to re-run the installer. Use the **Tunnel & Domain** page, or the command line on the Pi:
+
+```bash
+# Replace the tunnel token (paste the token, then press Enter and Ctrl+D)
+sudo rpi-webhost-config set-token
+
+# Point www.<domain> at the tunnel (Cloudflare API token read from stdin, never stored)
+read -rs -p "API token: " T; echo; printf '%s\n' "$T" | sudo rpi-webhost-config set-domain example.com; unset T
+
+sudo rpi-webhost-config status
+```
+
+- The API token needs **Zone:Read, DNS:Edit and Cloudflare Tunnel:Edit**. It is used once and never written to disk.
+- `set-token` checks the new token, applies it, and waits for the tunnel to connect. If it doesn't connect within about 40 seconds, the previous token is restored automatically.
+- `set-domain` keeps any other hostnames you've added to the tunnel.
+- Already installed an older version? Re-run `install.sh` once. It now refreshes the GUI, helper and sudoers rules and leaves your site files and config alone.
 
 ---
 
@@ -184,24 +203,28 @@ The installer applies the following automatically:
 
 - **Cloudflare Tunnel** — no inbound ports open on your router; all web traffic is outbound-initiated
 - **LAN isolation** — RFC1918 ranges (`10.x`, `172.16.x`, `192.168.x`) are blocked outbound; a compromised Pi cannot reach other devices on your home network. System DNS is switched to Cloudflare (1.1.1.1) so name resolution still works
-- **Least-privilege service** — the management GUI runs as a dedicated `rpi-webhost` system user, not root. It can only restart cloudflared via a narrow sudoers entry
-- **CSRF protection** — the GUI rejects POST requests from any origin other than `localhost:8080`
+- **Least-privilege service** — the management GUI runs as a dedicated `rpi-webhost` system user, not root, with basic systemd sandboxing. Its own code is root-owned and read-only to that user. It can only restart cloudflared and run `rpi-webhost-config` through narrow sudoers entries
+- **Host and CSRF protection** — the GUI only answers requests addressed to `localhost` / `127.x.x.x` (this blocks DNS-rebinding attacks from web pages you visit while the SSH tunnel is open), and rejects POSTs from any other origin
+- **Tunnel token kept private** — stored in a root-only file (`/etc/cloudflared/tunnel.env`), not on the cloudflared command line where every local user could read it with `ps`. Re-running the installer migrates older installs
+- **Audit log** — every token or domain change is written to the system log: `journalctl -t rpi-webhost-config`
+- **Verified downloads** — cloudflared is checked against the SHA-256 GitHub publishes for the release before it is installed. Pin the GUI code to a release with `sudo RPI_WEBHOST_REF=<tag> bash install.sh` (or install from a git clone, which is used automatically)
+- **Security updates keep flowing** — outbound port 80 is allowed so plain-HTTP apt mirrors work (packages are GPG-signed); unattended-upgrades is enabled
 - **Real visitor IPs** — nginx is configured to read `CF-Connecting-IP` from the tunnel so logs and fail2ban see actual IPs, not `127.0.0.1`
 - **HSTS** — nginx sends `Strict-Transport-Security` which Cloudflare forwards to browsers
 - **fail2ban** — bans IPs after 5 failed SSH attempts in 10 minutes
 - **SSH hardening** — root login disabled, `MaxAuthTries 3`, `LoginGraceTime 20`
 - **GUI on localhost only** — never bound to a public interface
 
-**Recommended after install** — set up SSH key auth and disable password login:
+**SSH password login** is switched off automatically when the installer finds an SSH key on the Pi (so it can never lock you out of a Pi without one). If you have no key yet:
 
 ```bash
 # On your laptop
 ssh-copy-id pi@<your-pi-ip>
 
-# On the Pi
-sudo sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-sudo systemctl reload sshd
+# Then re-run the installer (or: sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && sudo systemctl reload ssh)
 ```
+
+Installer options (environment variables): `KEEP_SSH_PASSWORD=1` leaves password login on, `RPI_WEBHOST_REF=<tag|commit>` pins the downloaded GUI code, `CLOUDFLARED_SKIP_VERIFY=1` skips the checksum check if the GitHub API is unreachable (not recommended).
 
 ---
 

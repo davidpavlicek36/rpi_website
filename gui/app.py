@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ipaddress
 import os
 import re
 import subprocess
@@ -44,6 +45,24 @@ def _load_secret_key() -> bytes:
 app.secret_key = _load_secret_key()
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload cap
 
+# ── Host check — blocks DNS rebinding ─────────────────────────────────────────
+# The GUI is only reached through an SSH tunnel, so the Host header must be a
+# loopback name. A rebinding attacker's page is served under their own domain,
+# so its Host (and Origin) would be attacker.example — never loopback.
+def is_loopback_host(host: str) -> bool:
+    name = urlparse('//' + host).hostname or ''
+    if name == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+@app.before_request
+def host_protect():
+    if not is_loopback_host(request.host):
+        return 'Forbidden: this interface is only available on localhost.', 403
+
 # ── CSRF protection — reject cross-origin POSTs ───────────────────────────────
 @app.before_request
 def csrf_protect():
@@ -82,6 +101,24 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     CONFIG_FILE.write_text('\n'.join(f"{k}={v}" for k, v in cfg.items()) + '\n')
     CONFIG_FILE.chmod(0o600)
+
+def run_config_helper(args: list, secret: str):
+    """Run the root helper; the secret goes via stdin so it never appears in argv or logs."""
+    secret = secret.strip()
+    if not secret:
+        flash('A token is required.', 'error')
+        return
+    try:
+        r = subprocess.run(
+            ['sudo', '-n', '/usr/local/sbin/rpi-webhost-config', *args],
+            input=secret + '\n', capture_output=True, text=True, timeout=90
+        )
+    except subprocess.TimeoutExpired:
+        flash('The change timed out — check the Pi directly.', 'error')
+        return
+    msg = (r.stdout if r.returncode == 0 else r.stderr).strip()
+    msg = msg.replace(secret, '***') or ('Done.' if r.returncode == 0 else 'The change failed.')
+    flash(msg, 'success' if r.returncode == 0 else 'error')
 
 def nginx_status() -> str:
     try:
@@ -227,13 +264,23 @@ def domain():
             try:
                 subprocess.run(
                     ['sudo', '/usr/bin/systemctl', 'restart', 'cloudflared'],
-                    capture_output=True, check=True, timeout=15
+                    capture_output=True, text=True, check=True, timeout=15
                 )
                 flash('Cloudflare Tunnel restarted.', 'success')
             except subprocess.CalledProcessError as e:
                 flash(f'Failed to restart tunnel: {e.stderr}', 'error')
             except subprocess.TimeoutExpired:
                 flash('Restart timed out — check the Pi directly.', 'error')
+
+        elif action == 'set_token':
+            run_config_helper(['set-token'], request.form.get('tunnel_token', ''))
+
+        elif action == 'set_domain':
+            new_domain = request.form.get('domain', '').strip().lower()
+            if not valid_domain(new_domain):
+                flash('Invalid domain name.', 'error')
+            else:
+                run_config_helper(['set-domain', new_domain], request.form.get('api_token', ''))
 
         return redirect(url_for('domain'))
 
