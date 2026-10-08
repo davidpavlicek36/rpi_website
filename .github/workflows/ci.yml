@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly: catches upstream drift even with no commits
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: bash -n install.sh && bash -n diagnose.sh
+      - name: shellcheck
+        run: shellcheck -S warning install.sh diagnose.sh
+      - name: ruff
+        run: pipx run ruff check gui/app.py
+
+  upstream-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cloudflared release assets exist for every arch install.sh uses
+        run: |
+          base=https://github.com/cloudflare/cloudflared/releases/latest/download
+          for f in cloudflared-linux-arm64.deb cloudflared-linux-amd64.deb cloudflared-linux-arm; do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/$f")
+            echo "$f -> $code"
+            [ "$code" = 200 ] || { echo "::error::missing cloudflared asset $f"; exit 1; }
+          done
+      - name: Cloudflare API still answers
+        run: curl -fsS https://api.cloudflare.com/client/v4/ips | grep -q '"success":true'
+
+  packages:
+    # Do the apt packages install.sh asks for still exist on each Debian release?
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: [bullseye, bookworm, trixie]
+    container: debian:${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve packages
+        run: |
+          apt-get update -qq
+          for p in nginx python3 python3-flask python3-werkzeug ufw fail2ban curl; do
+            apt-cache policy "$p" | grep -q 'Candidate: [^(]' || { echo "::error::$p has no candidate on ${{ matrix.release }}"; exit 1; }
+          done
+      - name: Install web stack and smoke-test GUI imports + diagnose.sh
+        run: |
+          apt-get install -y -qq nginx python3 python3-flask python3-werkzeug curl iproute2 >/dev/null
+          python3 -c 'import flask, werkzeug; print("flask", flask.__version__, "werkzeug", werkzeug.__version__)'
+          python3 -m py_compile gui/app.py
+          # diagnose.sh must run to completion without crashing, even though
+          # most checks fail inside a container (no systemd, no tunnel).
+          bash diagnose.sh --no-color || [ $? -eq 1 ]

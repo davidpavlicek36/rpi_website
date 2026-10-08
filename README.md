@@ -225,6 +225,14 @@ The following models should work but have not been tested. Use the recommended O
 
 ## Troubleshooting
 
+**Cloudflare error page (1033, 530, 502, 522…) or the site stopped working**
+Run the read-only health check on the Pi. It checks the tunnel, firewall, DNS, nginx and the GUI, and says whether the tunnel or the origin is at fault:
+```bash
+curl -fsSL https://raw.githubusercontent.com/davidpavlicek36/rpi_website/main/diagnose.sh -o diagnose.sh
+sudo bash diagnose.sh
+```
+It changes nothing and never prints tokens, so its output is safe to paste into an issue. A weekly GitHub Actions run checks that the packages and cloudflared downloads the installer relies on still exist, but firewall, DNS and Pi Zero (armv6) behaviour can only be verified on real hardware with this script.
+
 **Installer appears frozen at "Enabling firewall"**
 This is a known SSH buffering behaviour — the firewall step applies kernel-level rules which takes time on a Pi Zero (up to 2-3 minutes). The installer is running fine in the background, the output is just buffered by the SSH connection and not displayed yet. Wait 1-2 minutes, then press `Ctrl+C`. The buffered output will flush and you will see that all steps completed successfully. Do not re-run the installer.
 
