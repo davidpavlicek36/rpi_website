@@ -55,11 +55,11 @@ When someone visits your domain, this is what happens step by step:
 ### Step 1 — Flash your Pi
 
 1. Download [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
-2. Choose **Raspberry Pi OS Lite 32-bit** (Bullseye)
-3. Click the ⚙️ settings icon before writing:
-   - Enable SSH
-   - Set username `pi` and a password
-   - Configure your WiFi if not using ethernet
+2. Choose **Raspberry Pi OS Lite** (the current release; 32-bit for Pi Zero / Zero W, see [Compatibility](#compatibility))
+3. Open the OS customisation settings before writing (a ⚙️ icon or a "Next → Edit settings" prompt, depending on the Imager version) and set:
+   - Hostname and a username + password
+   - Wi-Fi details, if not using ethernet
+   - Enable SSH (ideally with your public key)
 4. Flash the SD card, insert into Pi, power on
 5. Find your Pi's IP address from your router's device list, then SSH in:
 ```bash
@@ -70,25 +70,19 @@ ssh pi@<your-pi-ip>
 
 ### Step 2 — Add your domain to Cloudflare
 
-1. Sign up for a free account at [cloudflare.com](https://www.cloudflare.com)
-2. Click **Add a site** → enter your domain → choose the **Free** plan
-3. Cloudflare scans your DNS — click **Continue**
-4. Cloudflare shows you two nameservers, e.g.:
-   ```
-   elsa.ns.cloudflare.com
-   gary.ns.cloudflare.com
-   ```
-5. Copy them — you'll need them in the next step
+> Cloudflare's dashboard is redesigned fairly often, so menu names below describe *what to look for*, not exact clicks. If something has moved, the linked Cloudflare docs are always current.
+
+1. Sign up for a free account at [cloudflare.com](https://www.cloudflare.com).
+2. Add your domain as a site, on the **Free** plan ([docs](https://developers.cloudflare.com/fundamentals/manage-domains/add-site/)).
+3. Cloudflare gives you **two nameservers** (e.g. `elsa.ns.cloudflare.com`). Keep them for the next step.
 
 ---
 
 ### Step 3 — Point your domain to Cloudflare
 
-Log in to your domain registrar (e.g. GoDaddy) and update the nameservers:
+At your domain registrar (GoDaddy, Namecheap, …), find the domain's **nameserver** settings, switch to *custom nameservers*, and enter the two Cloudflare ones. Cloudflare's [nameserver guide](https://developers.cloudflare.com/dns/nameservers/update-nameservers/) covers common registrars.
 
-- **GoDaddy**: My Products → your domain → DNS → Nameservers → Change → Custom → paste Cloudflare's nameservers → Save
-
-Propagation takes 15–60 minutes. Your Cloudflare dashboard will show the domain as **Active** when done. You can also verify:
+Propagation takes 15–60 minutes (sometimes longer). The domain shows as **Active** in the Cloudflare dashboard when done. You can also verify:
 ```bash
 dig yourdomain.com NS
 ```
@@ -98,24 +92,29 @@ You should see Cloudflare nameservers in the result.
 
 ### Step 4 — Create a Cloudflare tunnel token
 
-1. Go to [one.dash.cloudflare.com](https://one.dash.cloudflare.com) → **Networks → Tunnels → Create a tunnel**
-2. Choose **Cloudflared**, give it a name (e.g. `my-pi`)
-3. Copy the token shown — you'll use it in Step 6
+In the **Cloudflare Zero Trust** dashboard ([one.dash.cloudflare.com](https://one.dash.cloudflare.com)), find the **Tunnels** section (currently under *Networks*) and create a new tunnel of type **Cloudflared** ([docs](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/)).
+
+- Give it any name (e.g. `my-pi`).
+- Cloudflare shows an install command containing a long token starting with `eyJ`. **Copy only the token**, not the whole command. You'll use it in Step 6.
+- You can ignore the "install connector" and "public hostname" screens. The installer takes care of those.
+
+> Zero Trust may ask for a payment method on first use. The free plan is enough and isn't charged.
 
 ---
 
-### Step 5 — Create a Cloudflare API token
+### Step 5 — Create a Cloudflare API token *(optional but recommended)*
 
-This allows the installer to automatically configure your DNS and tunnel route.
+This lets the installer create the DNS record and tunnel route for you. Create a **custom API token** at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) ([docs](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)) with these permissions:
 
-1. Go to [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
-2. Click **Create Token** → **Create Custom Token**
-3. Add these two permissions:
-   - `Zone → DNS → Edit`
-   - `Account → Cloudflare Tunnel → Edit`
-4. Under **Zone Resources** set **Include → All zones**
-5. Click **Continue to summary → Create Token**
-6. Copy the token — it is only shown once
+| Scope | Permission |
+|---|---|
+| Zone | DNS → Edit |
+| Zone | Zone → Read |
+| Account | Cloudflare Tunnel → Edit |
+
+Limit **Zone Resources** to your domain (or all zones), then create the token and copy it right away. It is only shown once.
+
+If permission names differ slightly in the current UI, pick the ones that mean *edit DNS records*, *read zones* and *edit tunnels*. If you skip this step, you can add the hostname by hand (see [Troubleshooting](#troubleshooting)).
 
 ---
 
@@ -135,7 +134,7 @@ sudo CF_TOKEN=<tunnel-token> CF_API_TOKEN=<api-token> DOMAIN=yourdomain.com bash
 | `CF_API_TOKEN` | API token from Step 5 | `abc123...` |
 | `DOMAIN` | Your domain — root only, no `www`, no `https://` | `yourdomain.com` |
 
-The installer takes 2–5 minutes. When it finishes, your site is live at `https://www.yourdomain.com`.
+The installer is safe to re-run if it stops partway; it skips what is already done. It takes 2–5 minutes on most Pis (longer on a Zero). When it finishes, your site is live at `https://www.yourdomain.com`.
 
 > **Note:** `CF_API_TOKEN` and `DOMAIN` are optional. If you omit them, the installer still runs but you must configure the tunnel public hostname manually in the Cloudflare dashboard after (see [Troubleshooting](#troubleshooting)).
 
@@ -209,10 +208,11 @@ The installer applies the following automatically:
 - **Audit log** — every token or domain change is written to the system log: `journalctl -t rpi-webhost-config`
 - **Verified downloads** — cloudflared is checked against the SHA-256 GitHub publishes for the release before it is installed. Pin the GUI code to a release with `sudo RPI_WEBHOST_REF=<tag> bash install.sh` (or install from a git clone, which is used automatically)
 - **Security updates keep flowing** — outbound port 80 is allowed so plain-HTTP apt mirrors work (packages are GPG-signed); unattended-upgrades is enabled
+- **Firewall backend auto-selected** — the installer uses `iptables-nft` on modern kernels (Trixie) and `iptables-legacy` where the kernel still provides it (Bullseye)
 - **Real visitor IPs** — nginx is configured to read `CF-Connecting-IP` from the tunnel so logs and fail2ban see actual IPs, not `127.0.0.1`
 - **HSTS** — nginx sends `Strict-Transport-Security` which Cloudflare forwards to browsers
 - **fail2ban** — bans IPs after 5 failed SSH attempts in 10 minutes
-- **SSH hardening** — root login disabled, `MaxAuthTries 3`, `LoginGraceTime 20`
+- **SSH hardening** — root login disabled, `MaxAuthTries 3`, `LoginGraceTime 20`. Written as an early-loading drop-in (`/etc/ssh/sshd_config.d/00-rpi-webhost.conf`) so other config files can't silently override it, then verified with `sshd -T`
 - **GUI on localhost only** — never bound to a public interface
 
 **SSH password login** is switched off automatically when the installer finds an SSH key on the Pi (so it can never lock you out of a Pi without one). If you have no key yet:
@@ -221,7 +221,8 @@ The installer applies the following automatically:
 # On your laptop
 ssh-copy-id pi@<your-pi-ip>
 
-# Then re-run the installer (or: sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && sudo systemctl reload ssh)
+# Then re-run the installer. It writes /etc/ssh/sshd_config.d/00-rpi-webhost.conf
+# and checks the result with `sudo sshd -T | grep passwordauth`
 ```
 
 Installer options (environment variables): `KEEP_SSH_PASSWORD=1` leaves password login on, `RPI_WEBHOST_REF=<tag|commit>` pins the downloaded GUI code, `CLOUDFLARED_SKIP_VERIFY=1` skips the checksum check if the GitHub API is unreachable (not recommended).
@@ -230,19 +231,19 @@ Installer options (environment variables): `KEEP_SSH_PASSWORD=1` leaves password
 
 ## Compatibility
 
-**Tested on:** Raspberry Pi Zero 1 WH — Raspberry Pi OS Lite 32-bit (Bullseye)
+**Tested on:** Raspberry Pi Zero W (ARMv6) — Raspberry Pi OS Lite 32-bit, Debian **Trixie** (kernel 6.18) and Bullseye.
 
-The following models should work but have not been tested. Use the recommended OS to maximise compatibility:
+The installer detects the OS and kernel and adapts (firewall backend, network manager, ssh config layout). In general:
 
-| Model | Recommended OS | Confidence |
+| Model | OS | Confidence |
 |---|---|---|
-| Pi Zero 1 / W / WH | Pi OS Lite **32-bit** (Bullseye) | ✅ Tested |
-| Pi Zero 2 W | Pi OS Lite **32-bit** (Bullseye) | 🟡 Untested — nearly identical setup |
-| Pi 2 / Pi 3 | Pi OS Lite **32-bit** (Bullseye) | 🟡 Untested — should work |
-| Pi 4 | Pi OS Lite **32-bit** (Bullseye) | 🟡 Untested — use Bullseye, not Bookworm |
-| Pi 5 | Pi OS Lite **64-bit** (Bookworm) | 🔴 Untested — Bookworm only, may need manual fixes |
+| Pi Zero / W / WH | Pi OS Lite **32-bit**, current release | ✅ Tested |
+| Pi Zero 2 W, Pi 2 / 3 | Pi OS Lite **32-bit**, current release | 🟡 Untested, should work |
+| Pi 4 / 5 | Pi OS Lite **64-bit**, current release | 🟡 Untested, should work |
 
-> Avoid the desktop version of Pi OS — Lite is recommended for any server use. Always flash using [Raspberry Pi Imager](https://www.raspberrypi.com/software/) and enable SSH in the Advanced Settings before writing.
+Use the **current** Raspberry Pi OS Lite release offered by Imager; avoid the desktop edition. Older releases (Bullseye) still work, but get no new security updates. Run `sudo bash diagnose.sh` after install to confirm your setup.
+
+> After a fresh flash, run `sudo apt update && sudo apt full-upgrade -y && sudo reboot` before the installer. A new kernel installed without a reboot can break the firewall step (modules for the running kernel go missing).
 
 ---
 
@@ -256,6 +257,11 @@ sudo bash diagnose.sh
 ```
 It changes nothing and never prints tokens, so its output is safe to paste into an issue. A weekly GitHub Actions run checks that the packages and cloudflared downloads the installer relies on still exist, but firewall, DNS and Pi Zero (armv6) behaviour can only be verified on real hardware with this script.
 
+**Installer fails at "Firewall" (`ip_tables not found`, `problem running ufw-init`)**
+The installer now prints ufw's real error. Typical causes:
+- *`Module ip_tables not found`* — your kernel only supports the nft backend. Run `sudo update-alternatives --set iptables /usr/sbin/iptables-nft && sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-nft`, then re-run the installer.
+- Running kernel differs from the installed one (`uname -r` vs `ls /lib/modules`) — `sudo reboot`, then re-run.
+
 **Installer appears frozen at "Enabling firewall"**
 This is a known SSH buffering behaviour — the firewall step applies kernel-level rules which takes time on a Pi Zero (up to 2-3 minutes). The installer is running fine in the background, the output is just buffered by the SSH connection and not displayed yet. Wait 1-2 minutes, then press `Ctrl+C`. The buffered output will flush and you will see that all steps completed successfully. Do not re-run the installer.
 
@@ -267,7 +273,7 @@ SSH is disabled by default on a fresh Pi OS install. Enable it in Raspberry Pi I
 sudo systemctl status nginx
 sudo systemctl status cloudflared
 ```
-Check that the Public Hostname in the Cloudflare dashboard points to `http://localhost:80`.
+Check that the tunnel has a **public hostname** (in the tunnel's settings in Zero Trust) for `www.yourdomain.com` with service `http://localhost:80`. Menu names change over time; see Cloudflare's [tunnel docs](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
 
 **Tunnel not connecting**
 ```bash

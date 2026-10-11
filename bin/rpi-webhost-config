@@ -81,7 +81,7 @@ def parse_token(raw):
             isinstance(data.get(k), str) and ID_RE.fullmatch(data[k]) for k in ('a', 't')) \
             or not isinstance(data.get('s'), str) or not data['s']:
         raise Fail('Token is missing the account, tunnel or secret fields. '
-                   'Copy it again from Zero Trust > Networks > Tunnels.')
+                   'Copy it again from the Tunnels section of the Cloudflare Zero Trust dashboard.')
     return token, data
 
 

@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
             echo "  sudo CF_TOKEN=<token> bash install.sh"
             echo "  sudo CF_TOKEN=<token> CF_API_TOKEN=<api-token> DOMAIN=yourdomain.com bash install.sh"
             echo ""
-            echo "  CF_TOKEN      — tunnel token from Zero Trust → Networks → Tunnels"
+            echo "  CF_TOKEN      — tunnel token (Cloudflare Zero Trust dashboard → Tunnels)"
             echo "  CF_API_TOKEN  — API token with Zone:Read + DNS:Edit + Cloudflare Tunnel:Edit permissions"
             echo "  DOMAIN        — your domain (e.g. example.com) — required with CF_API_TOKEN"
             exit 0 ;;
@@ -89,7 +89,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$CLOUDFLARE_TOKEN" ]] && err \
-    "Cloudflare tunnel token required.\n\n  sudo CF_TOKEN=<token> bash install.sh\n\nGet one at: dash.teams.cloudflare.com → Networks → Tunnels"
+    "Cloudflare tunnel token required.\n\n  sudo CF_TOKEN=<token> bash install.sh\n\nCreate a tunnel in the Cloudflare Zero Trust dashboard (one.dash.cloudflare.com → Tunnels)\n  and copy its token. See the README, Step 4."
 
 if [[ -n "$CF_API_TOKEN" && -z "$DOMAIN" ]]; then
     err "DOMAIN is required when CF_API_TOKEN is set.\n  Example: sudo CF_TOKEN=<t> CF_API_TOKEN=<a> DOMAIN=example.com bash install.sh"
@@ -822,7 +822,7 @@ else
     # waits for the tunnel to connect.
     if ! HELPER_OUT=$(printf '%s\n' "$CLOUDFLARE_TOKEN" | RPI_WEBHOST_CONNECT_TIMEOUT=90 /usr/local/sbin/rpi-webhost-config set-token 2>&1); then
         journalctl -u cloudflared -n 15 --no-pager 2>/dev/null || true
-        err "${HELPER_OUT}\n  Common causes:\n  - Invalid or expired token — get a new one at dash.teams.cloudflare.com → Networks → Tunnels\n  - Outbound 443 / 7844 blocked by your router or network\n  Run 'sudo bash diagnose.sh' for a full check, then re-run the installer."
+        err "${HELPER_OUT}\n  Common causes:\n  - Invalid or expired token — create/copy a new token from the Tunnels section of the Cloudflare Zero Trust dashboard\n  - Outbound 443 / 7844 blocked by your router or network\n  Run 'sudo bash diagnose.sh' for a full check, then re-run the installer."
     fi
     log "Cloudflare Tunnel installed and connected"
 fi
@@ -855,7 +855,7 @@ if [[ -n "$DOMAIN" ]]; then
 echo -e "  ${BOLD}Site:${NC}  https://${DOMAIN}"
 else
 echo -e "  ${BOLD}Site:${NC}  Configure a Public Hostname in Cloudflare Zero Trust:"
-echo    "         dash.cloudflare.com → Zero Trust → Networks → Tunnels"
+echo    "         one.dash.cloudflare.com → Tunnels → your tunnel → Public Hostname"
 echo    "         Public Hostname → http://localhost:80"
 fi
 echo ""
