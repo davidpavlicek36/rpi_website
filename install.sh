@@ -132,14 +132,25 @@ if ! iptables -L &>/dev/null 2>&1; then
     warn "iptables not available — attempting to install…"
     apt-get install -y iptables > /dev/null 2>&1 || err "Could not install iptables. Run: sudo apt-get install iptables"
 fi
-# Detect nftables/iptables mismatch (common cause of ufw hanging on Bullseye)
-if iptables --version 2>/dev/null | grep -q "nf_tables"; then
-    info "nftables backend detected — switching to iptables-legacy to prevent ufw hang…"
-    update-alternatives --set iptables  /usr/sbin/iptables-legacy  2>/dev/null || true
-    update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
-    log "iptables-legacy set as default"
+# Legacy iptables needs the ip_tables kernel module. Newer kernels (Trixie /
+# 6.12+) ship without it and only work with the nft backend; Bullseye can hang
+# ufw on nft, so it prefers legacy. Pick whichever the running kernel supports.
+set_iptables_backend() {  # $1 = legacy | nft
+    update-alternatives --set iptables  "/usr/sbin/iptables-$1"  2>/dev/null || true
+    update-alternatives --set ip6tables "/usr/sbin/ip6tables-$1" 2>/dev/null || true
+}
+if modprobe ip_tables 2>/dev/null || modinfo ip_tables &>/dev/null; then
+    if iptables --version 2>/dev/null | grep -q "nf_tables"; then
+        info "nftables backend detected — switching to iptables-legacy to prevent ufw hang…"
+        set_iptables_backend legacy
+        log "iptables-legacy set as default"
+    else
+        log "iptables backend OK"
+    fi
 else
-    log "iptables backend OK"
+    info "Kernel $(uname -r) has no ip_tables module — using the nftables backend…"
+    set_iptables_backend nft
+    log "iptables-nft set as default"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -493,22 +504,26 @@ info "Enabling firewall… (may take up to 60 s — Pi is still working)"
 ( printf '.'; while true; do sleep 2; printf '.'; done ) &
 DOTS_PID=$!
 UFW_RC=0
-timeout 45 ufw --force enable > /dev/null 2>&1 || UFW_RC=$?
+UFW_LOG=$(mktemp)
+timeout 45 ufw --force enable > "$UFW_LOG" 2>&1 || UFW_RC=$?
 kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null || true; printf '\n'
 
 if [[ $UFW_RC -ne 0 ]]; then
-    warn "ufw enable timed out — applying iptables-legacy fix…"
-    update-alternatives --set iptables  /usr/sbin/iptables-legacy  2>/dev/null || true
-    update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
+    if modinfo ip_tables &>/dev/null; then FALLBACK=legacy; else FALLBACK=nft; fi
+    warn "ufw enable failed — retrying with iptables-$FALLBACK…"
+    set_iptables_backend "$FALLBACK"
     ( printf '.'; while true; do sleep 2; printf '.'; done ) &
     DOTS_PID=$!
     UFW_RC2=0
-    timeout 30 ufw --force enable > /dev/null 2>&1 || UFW_RC2=$?
+    timeout 30 ufw --force enable > "$UFW_LOG" 2>&1 || UFW_RC2=$?
     kill $DOTS_PID 2>/dev/null; wait $DOTS_PID 2>/dev/null || true; printf '\n'
     if [[ $UFW_RC2 -ne 0 ]]; then
-        err "Firewall still failed to enable after iptables-legacy fix.\n  Run manually: sudo update-alternatives --set iptables /usr/sbin/iptables-legacy\n  Then: sudo ufw --force enable"
+        warn "ufw output (exit $UFW_RC2):"
+        sed 's/^/    /' "$UFW_LOG" >&2
+        warn "Running kernel: $(uname -r); modules installed: $(ls /lib/modules 2>/dev/null | tr '\n' ' ')"
+        err "Firewall still failed to enable after iptables-legacy fix.\n  Run manually: sudo update-alternatives --set iptables /usr/sbin/iptables-nft (or -legacy)\n  Then: sudo ufw --force enable"
     fi
-    log "iptables-legacy applied and firewall enabled"
+    log "iptables-$FALLBACK applied and firewall enabled"
 fi
 
 log "Firewall active — Pi is LAN-isolated"
@@ -548,41 +563,67 @@ fi
 step "SSH hardening"
 # ─────────────────────────────────────────────────────────────────────────────
 SSHD="/etc/ssh/sshd_config"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/00-rpi-webhost.conf"
 
-if grep -q "^PermitRootLogin no" "$SSHD" 2>/dev/null; then
+# sshd keeps the FIRST value it sees, and Debian (Bookworm/Trixie) includes
+# sshd_config.d/*.conf at the very top of sshd_config — so editing sshd_config
+# alone is silently overridden by any drop-in. Write our own 00- drop-in (read
+# first) when Include is supported, otherwise edit sshd_config (Bullseye).
+if grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$SSHD" 2>/dev/null; then
+    SSHD_TARGET="$SSHD_DROPIN"; mkdir -p /etc/ssh/sshd_config.d
+else
+    SSHD_TARGET="$SSHD"
+fi
+# sshd_set <Key> <value>
+sshd_set() {
+    if [[ "$SSHD_TARGET" == "$SSHD_DROPIN" ]]; then
+        touch "$SSHD_TARGET"
+        sed -i "/^$1[[:space:]]/d" "$SSHD_TARGET"
+        echo "$1 $2" >> "$SSHD_TARGET"
+    elif grep -q "^#\?$1" "$SSHD"; then
+        sed -i "s/^#\?$1.*/$1 $2/" "$SSHD"
+    else
+        echo "$1 $2" >> "$SSHD"
+    fi
+}
+sshd_effective() { sshd -T 2>/dev/null | awk -v k="$1" '$1==k{print $2}'; }
+sshd_backup()  { SSHD_BAK="$SSHD_TARGET.bak.$(date +%s)"; if [[ -e "$SSHD_TARGET" ]]; then cp "$SSHD_TARGET" "$SSHD_BAK"; else SSHD_BAK=""; fi; }
+sshd_restore() { if [[ -n "${SSHD_BAK:-}" ]]; then cp "$SSHD_BAK" "$SSHD_TARGET"; else rm -f "$SSHD_TARGET"; fi; }
+sshd_reload()  { timeout 15 systemctl reload ssh 2>/dev/null || timeout 15 systemctl reload sshd; }
+
+if [[ "$(sshd_effective permitrootlogin)" == "no" && "$(sshd_effective maxauthtries)" == "3" ]]; then
     skip "SSH hardening (already applied)"
 else
-    info "Backing up $SSHD → ${SSHD}.bak.$(date +%s)"
-    cp "$SSHD" "${SSHD}.bak.$(date +%s)"
-
-    info "Disabling root login…"
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' "$SSHD"
-    info "Disabling X11 forwarding…"
-    sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' "$SSHD"
-    info "Setting max auth tries to 3…"
-    sed -i 's/^#\?MaxAuthTries.*/MaxAuthTries 3/' "$SSHD"
-    info "Setting login grace time to 20 s…"
-    sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 20/' "$SSHD"
+    sshd_backup
+    info "Applying SSH hardening to $SSHD_TARGET…"
+    sshd_set PermitRootLogin no
+    sshd_set X11Forwarding no
+    sshd_set MaxAuthTries 3
+    sshd_set LoginGraceTime 20
 
     info "Validating sshd config before reload…"
     if ! sshd -t 2>/tmp/sshd-test.log; then
         cat /tmp/sshd-test.log
         warn "sshd config has errors — restoring backup to avoid locking you out"
-        cp "${SSHD}.bak."* "$SSHD" 2>/dev/null || true
+        sshd_restore
         err "SSH config validation failed (see above). Original config restored."
     fi
 
     info "Reloading SSH daemon…"
-    if ! timeout 15 systemctl reload ssh 2>/dev/null && ! timeout 15 systemctl reload sshd; then
+    if ! sshd_reload; then
         err "sshd reload failed.\n  Your SSH session is still active but hardening was not applied.\n  Run 'sudo systemctl status ssh' for details."
     fi
-    log "SSH hardened"
+    if [[ "$(sshd_effective permitrootlogin)" != "no" ]]; then
+        warn "Root login is still enabled — another sshd config file overrides ours. Check: sudo sshd -T | grep permitroot"
+    else
+        log "SSH hardened"
+    fi
 fi
 
 # Password logins: only switched off when a user already has an authorized key, so the
 # installer can never lock you out of a Pi that has no key yet. Opt out: KEEP_SSH_PASSWORD=1
 PASSWORD_AUTH_OFF=0
-if [[ "$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2}')" == "no" ]]; then
+if [[ "$(sshd_effective passwordauthentication)" == "no" ]]; then
     PASSWORD_AUTH_OFF=1
     skip "SSH password login already disabled"
 elif [[ "${KEEP_SSH_PASSWORD:-}" == "1" ]]; then
@@ -594,21 +635,17 @@ else
     done
     if (( HAVE_KEY )); then
         info "An SSH key is installed — disabling SSH password login…"
-        cp "$SSHD" "${SSHD}.bak.pw.$(date +%s)"
-        if grep -q '^#\?PasswordAuthentication' "$SSHD"; then
-            sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD"
-        else
-            echo "PasswordAuthentication no" >> "$SSHD"
-        fi
-        if sshd -t 2>/dev/null && { timeout 15 systemctl reload ssh 2>/dev/null || timeout 15 systemctl reload sshd; }; then
-            if [[ "$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2}')" == "no" ]]; then
+        sshd_backup
+        sshd_set PasswordAuthentication no
+        if sshd -t 2>/dev/null && sshd_reload; then
+            if [[ "$(sshd_effective passwordauthentication)" == "no" ]]; then
                 PASSWORD_AUTH_OFF=1
                 log "SSH password login disabled (key login only)"
             else
-                warn "A drop-in in /etc/ssh/sshd_config.d/ still enables password login — check: sudo sshd -T | grep passwordauth"
+                warn "Another sshd config file still enables password login — check: sudo sshd -T | grep passwordauth"
             fi
         else
-            cp "$(ls -t ${SSHD}.bak.pw.* | head -1)" "$SSHD"
+            sshd_restore
             warn "Could not apply the password-login change — original sshd config restored"
         fi
     else

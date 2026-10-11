@@ -55,8 +55,8 @@ note "Model: $MODEL"
 note "OS: $CODENAME   Arch: $ARCH   Kernel: $(uname -r)   Python: $(python3 --version 2>&1)"
 
 case $CODENAME in
-    bullseye|bookworm) pass "OS release '$CODENAME' is one the installer was written for" ;;
-    *) warn "OS release '$CODENAME' is newer/unknown to install.sh" "DNS, ssh reload and iptables-legacy steps assume Bullseye/Bookworm" ;;
+    bullseye|bookworm|trixie) pass "OS release '$CODENAME' is one the installer was written for" ;;
+    *) warn "OS release '$CODENAME' is newer/unknown to install.sh" "DNS, ssh reload and iptables-legacy steps assume Bullseye/Bookworm/Trixie" ;;
 esac
 
 avail_kb=$(df -Pk / | awk 'NR==2{print $4}')
@@ -217,7 +217,7 @@ systemctl is-active fail2ban >/dev/null 2>&1 && pass "fail2ban is active" || war
 if have sshd && [[ -n "$SUDO$([[ $EUID -eq 0 ]] && echo x)" ]]; then
     eff=$($SUDO sshd -T 2>/dev/null | grep -E '^(permitrootlogin|passwordauthentication|maxauthtries|x11forwarding) ' | tr '\n' ';')
     note "sshd effective: ${eff:-unreadable}"
-    grep -q 'permitrootlogin no' <<<"$eff" && pass "Root SSH login disabled" || warn "Root SSH login is not disabled" "A sshd_config.d drop-in may override install.sh's edit"
+    grep -q 'permitrootlogin no' <<<"$eff" && pass "Root SSH login disabled" || warn "Root SSH login is not disabled" "Another sshd config file may override install.sh, or the SSH step never ran"
 fi
 if [[ -f /etc/sudoers.d/rpi-webhost ]]; then $SUDO visudo -cf /etc/sudoers.d/rpi-webhost >/dev/null 2>&1 && pass "sudoers.d/rpi-webhost is valid" || fail "sudoers.d/rpi-webhost is invalid"; fi
 
